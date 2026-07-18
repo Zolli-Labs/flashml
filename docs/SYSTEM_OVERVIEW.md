@@ -1,10 +1,11 @@
 # FlashML System Overview
 
 > **This document is the shared source of truth for the whole FlashML product
-> system.** An identical copy lives in `docs/` of all three repositories
-> (`flashnode`, `flashruntime`, `flashml-cloud`). If you change it, change it
-> everywhere. It distills the *FlashML Master Product Architecture and
-> Strategy Report* (July 2026).
+> system.** The canonical copy lives in `flashruntime/docs/SYSTEM_OVERVIEW.md`;
+> the copies in `flashnode` and `flashml-cloud` are synced from it — edit the
+> canonical copy and run `make sync-docs` from the workspace root, never edit
+> a synced copy directly. It distills the *FlashML Master Product Architecture
+> and Strategy Report* (July 2026).
 
 ---
 
