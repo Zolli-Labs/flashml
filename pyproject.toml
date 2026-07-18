@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashnode"
+version = "0.1.0"
+description = "Open host agent for the FlashML fragmented-compute network: join, benchmark, execute sandboxed ML tasks, earn contribution credits."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "psutil>=5.9",
+    "websockets>=12",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+flashnode = "flashnode.agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Zolli-Labs/flashnode"
+
+[tool.setuptools.packages.find]
+include = ["flashnode*"]
