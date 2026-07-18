@@ -17,7 +17,9 @@ FlashRuntime is one of three components in the FlashML system by
 
 Read [`docs/SYSTEM_OVERVIEW.md`](docs/SYSTEM_OVERVIEW.md) for the full
 product architecture, and [`AGENTS.md`](AGENTS.md) if you are an AI coding
-agent working in this repo.
+agent working in this repo. Detailed documentation of the working prototype
+code (architecture, provider contract, code walkthrough) lives in
+[`docs/prototype/`](docs/prototype/README.md).
 
 ## Status
 
