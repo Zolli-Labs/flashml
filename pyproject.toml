@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashruntime"
+version = "0.1.0"
+description = "Open fault-tolerant distributed ML runtime: job protocol, leases, checkpointing, and recovery across heterogeneous compute."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+sklearn = ["scikit-learn>=1.3"]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/Zolli-Labs/flashruntime"
+
+[tool.setuptools.packages.find]
+include = ["flashruntime*"]
