@@ -66,8 +66,11 @@ never executes workloads — KubeRay owns workload pods. Tests: `pytest` (28 —
    workspace-root `e2e/`. Two heartbeats, never merged: attempt →
    coordinator (lease liveness), node → registry (online/offline). Wire
    models from `flashruntime.protocol` (hard rule 2).
-   **Missing/next**: Ed25519 identity, `benchmark/` admission probes,
-   `telemetry/`, gVisor/Kata tiers, `join/status/leave` UX.
+   **Missing/next**: Ed25519 identity, gVisor/Kata tiers,
+   `join/status/leave` UX. `benchmark/`, `telemetry/`, `config/` now
+   carry their complete designed interfaces (ABCs + contract tests in
+   tests/test_interfaces.py; HostPolicy ships concrete with conservative
+   defaults) — implement the concrete probes/collector against them.
 
 ## Dev workflow
 
