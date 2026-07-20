@@ -1,3 +1,9 @@
+> **ARCHIVED (July 2026).** These documents describe the pre-Kubernetes
+> prototype engine (`engine/`, `algorithms/`, `adapters/`, `storage/`),
+> which still works behind the `[prototype]` extra but is not the
+> product's direction. Current architecture: workspace `HANDBOOK.md` and
+> `docs/SYSTEM_OVERVIEW.md`. Kept for reference only.
+
 # Prototype documentation (carried over)
 
 These documents were written for the FlashML prototype library — the code

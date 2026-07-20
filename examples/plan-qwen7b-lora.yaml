@@ -1,0 +1,31 @@
+# The master-report example, as a PlanRequest:
+#   Qwen 7B · LoRA · 4 × 24 GB GPUs on one host · $20 budget · 3-hour
+#   deadline · CPU offload allowed · quantization allowed.
+#
+#   flashruntime plan examples/plan-qwen7b-lora.yaml
+#
+apiVersion: flashml.dev/v1alpha1
+kind: PlanRequest
+workload:
+  kind: transformer_finetune
+  model: Qwen/Qwen2.5-7B          # in the planner catalog → parameters_b optional
+  method: lora
+  lora_rank: 16
+  precision: bf16
+  seq_len: 2048
+  micro_batch_per_gpu: 1
+  grad_accum: 8
+  train_tokens_m: 25             # 25M training tokens → enables time/cost estimates
+resources:
+  gpus: 4
+  gpu_type: RTX4090               # 24 GB, catalog throughput
+  hosts: 1
+  interconnect: same_host_pcie
+  cpu_ram_gb: 128
+  hourly_cost_usd_per_gpu: 0.44
+objective:
+  mode: balanced
+  max_cost_usd: 20
+  deadline_minutes: 240
+  allow_quantization: true
+  allow_cpu_offload: true

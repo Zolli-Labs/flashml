@@ -26,21 +26,106 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
    coordinator is a first-class mode, not a demo shim.
 5. Recovery actions are typed, deterministic, and logged. No LLM-driven
    recovery decisions.
+6. **Four orthogonal axes** (ADR-0003): providers get machines, launchers
+   start processes, strategies configure execution, recipes integrate user
+   code. Hugging Face code lives in `recipes/` — it is workload layer,
+   never a backend. The planner emits a backend-neutral `StrategyPlan` and
+   **never imports framework code** (no `import transformers`/`torch
+   .distributed`/`ray` inside `planner/`).
+7. **No empty scaffolding.** Create a module only in the vertical slice
+   that makes it real (workspace-root `PLAN_2WEEKS.md`). Mode A (leases)
+   before Mode B extensions; never reimplement distributed ML — plan,
+   launch, observe, recover.
+8. Ledger is append-only; job/task status is derived from events, never a
+   hand-mutated field. Checkpoint manifests are written last, after part
+   hashes verify — no manifest, no checkpoint.
 
 ## Current state (July 2026)
 
-- `engine/`, `algorithms/`, `adapters/`, `storage/` = working prototype
-  (provider-agnostic training with a local thread-pool backend), carried over
-  from the original FlashML library. Tests pass: `pytest`.
-- `protocol/`, `leases/`, `checkpoint/`, `recovery/`, `scheduler/` =
-  docstring-only scaffolds for the target architecture. Build here; migrate
-  prototype code in as the protocol lands.
+- `protocol/v1alpha1.py` = the versioned public protocol (JobSpec, JobState,
+  Event vocabulary, ArtifactRecord, node registration/heartbeat). flashnode
+  and flashml-cloud import it.
+- `backends/` = `ExecutionBackend` contract + working `KubeRayExecutionBackend`
+  (JobSpec → RayJob CR, status mapping, event normalization). Pins: KubeRay
+  chart 1.6.2, Ray 2.46.0.
+- `artifacts/` = ArtifactStore protocol; MinIO (S3-compatible) + native OSS.
+- `service/` = FastAPI runtime API (:8100) + SQLite ledger + `flashruntime` CLI.
+- `flashml_workloads/sharded_kmeans.py` = the POC's Ray workload (deterministic
+  shards, retriable tasks, honest recovery evidence).
+- `deploy/docker/` = kmeans + service images. `docs/adr/` = ACK Edge + PAI-DLC ADRs.
+- `engine/`, `algorithms/`, `adapters/`, `storage/` = pre-K8s prototype, kept
+  working; `scheduler/` remains the only scaffold package.
+- `planner/` + `protocol/plan_v1alpha1.py` = the strategy planner (July
+  2026): `flash.plan(PlanRequest)` → explained `PlanReport`/`StrategyPlan`;
+  CLI `flashruntime plan spec.yaml`. Deterministic, framework-import-free,
+  curated menu (single_gpu/ddp/fsdp2/zero3_cpu_offload + QLoRA variants,
+  lease_tasks for Mode A). Walkthrough: `docs/planner/README.md`. Estimator
+  constants live in `planner/catalog.py`; the arithmetic is pinned by
+  `tests/test_planner.py` — change formulas only with justification against
+  workspace-root `FLASHRUNTIME_EVALUATION.md`.
+- `leases/` = the Mode A state machine (July 2026): `LeaseManager` with
+  claim/heartbeat/expiry-sweep/idempotent-commit, injectable clock, typed
+  Event emission, `LeaseStore` seam (InMemory + restart-durable `SqliteLeaseStore`).
+- `checkpoint/` = `CheckpointCatalog` (July 2026): parts-first /
+  manifest-last commit, validation ladder (hash→restore-verified→invalid),
+  topology-compatible `latest_valid()`, `lost_work()` economics.
+- `recovery/` = `classify(FailureSignals)` precedence taxonomy +
+  `decide(failure, mode)` versioned policy table (POLICY_VERSION); total
+  over FailureClass × mode, correlated incidents freeze automation.
+- **Core is pydantic-only**: `import flashruntime` + planner/leases/
+  checkpoint/recovery must never require numpy/k8s/minio/fastapi (verified
+  by a clean-venv smoke; prototype engine is lazy via PEP 562 `__getattr__`
+  and gated behind `[prototype]`). Keep it that way.
+- `service/` Mode A surface (July 2026): LeaseManager over HTTP
+  (`/v1alpha1/leases/claim`, `/attempts/{id}/{heartbeat,complete,fail}`),
+  minimal node registry (`/nodes/*` — self-hosted profile; cloud fronts it
+  with join codes later), **local artifact hosting** (`PUT|GET
+  /v1alpha1/artifacts/{key}` under FLASHML_LOCAL_ARTIFACTS_DIR),
+  `hyperparameter_search` job→task expansion (`service/modea.py`,
+  `execution.backend: leases`), derived job states + 2 s sweeper, and a
+  self-contained dashboard at `GET /` (`service/dashboard.py`). KubeRay is
+  optional: `FLASHML_ENABLE_KUBERAY=0` runs the coordinator cloud-free.
+- Tests: `pytest` (109 unit; integration suite opt-in via `-m integration`,
+  lives in `tests/integration/` with env auto-skip). Images: `deploy/docker/`.
+  Full-loop proof: workspace-root `e2e/` (`make e2e`, `make e2e-demo`).
+  POC runbook: workspace-root `archive/POC_PLAN.md` + Makefile.
+
+## Status vs. plan (what's done, what's missing)
+
+Architecture decisions: `docs/adr/0003-…` + workspace-root
+`FLASHRUNTIME_EVALUATION.md`; execution log: workspace-root `PROGRESS.md`.
+
+**Done (July 2026, local milestone):** Mode A lease coordinator over HTTP
+(claim/heartbeat/complete/fail; commit-time sha256 validation against the
+task's commit_key; join-code-gated registration; artifact size caps);
+durable `SqliteLeaseStore` (in-flight leases survive coordinator restarts —
+agents re-register on their own); job→task expansion for
+`hyperparameter_search` and `sharded_kmeans`; checkpoint HTTP surface
+(task-scoped catalog: parts/commit/latest/lost-work); three task modules in
+`flashml_workloads/` (sklearn_trial, kmeans_shard+driver, sgd_trainer with
+bit-identical resume); dashboard at GET /; the planner. Proven by
+workspace-root `e2e/` (kill-a-machine sweep, K-means convergence,
+cross-machine training resume).
+
+**Missing (in rough priority order):**
+1. Stage-8 metrics from the ledger (MTTD/MTTR/goodput/lost-work) + case
+   study — every needed event already exists.
+2. Checkpoint-manifest persistence (catalog is in-memory; checkpoint
+   *files* are durable — manifests die with the coordinator).
+3. `recovery/` wiring into the service: today recovery is the implicit
+   lease-expiry path; `classify()`/`decide()` are tested but uncalled, and
+   FAILURE_CLASSIFIED / RECOVERY_ACTION_SELECTED events never fire.
+4. `flash.run(plan)`: planner and executor exist but aren't linked — the
+   e2e plans and then builds the JobSpec by hand.
+5. Cloud stage: Postgres (same append-only schema), SSE instead of
+   polling, ACK/KubeRay hybrid pool, `recipes/` (HF Trainer + PEFT LoRA on
+   the sgd_trainer checkpoint contract), `strategies/` + `launchers/`.
 
 ## Dev workflow
 
 ```bash
 uv venv && uv pip install -e ".[sklearn,dev]"
-pytest                    # 8 tests + docs link checker
+pytest                    # 109 unit tests (+ opt-in: pytest -m integration)
 ```
 
 Python ≥3.10, Pydantic for new schemas, pytest for everything. Match existing

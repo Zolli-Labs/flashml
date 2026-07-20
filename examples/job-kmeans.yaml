@@ -1,0 +1,51 @@
+# The POC job: distributed sharded K-Means on Ray via FlashRuntime.
+# Submit with: make poc-local-submit   (or: flashruntime submit examples/job-kmeans.yaml)
+apiVersion: flashml.dev/v1alpha1
+kind: Job
+
+metadata:
+  name: distributed-kmeans-demo
+
+spec:
+  execution:
+    backend: ray
+    environment: auto
+
+  image:
+    repository: flashml/kmeans
+    tag: poc-v1
+
+  workload:
+    type: sharded_kmeans
+    parameters:
+      samples: 150000
+      dimensions: 24
+      clusters: 6
+      shards: 36
+      iterations: 12
+      seed: 42
+      # Stretches each task slightly so worker loss reliably lands mid-run.
+      task_delay_seconds: 0.4
+
+  resources:
+    minimumWorkers: 2
+    maximumWorkers: 3
+    cpuPerTask: 1
+    memoryPerTask: 512Mi
+
+  placement:
+    pool: any
+    architectures:
+      - amd64
+      - arm64
+
+  isolation:
+    tier: standard
+    allowFallback: false
+
+  retryPolicy:
+    maxTaskAttempts: 4
+    retryWorkerLoss: true
+
+  artifacts:
+    outputPrefix: artifact://jobs/{job_id}/
