@@ -50,6 +50,7 @@ __all__ = [
     # planner
     "plan",
     "render",
+    "run",
     "PLANNER_VERSION",
     "PlanRequest",
     "PlanReport",
@@ -67,6 +68,37 @@ __all__ = [
     "algorithms",
     "registered_providers",
 ]
+
+def run(plan: StrategyPlan, coordinator_url: str | None = None):
+    """Execute a planner-selected StrategyPlan — **designed, not yet built**.
+
+    This is the plan→execution bridge (HANDBOOK §6 "known conscious
+    debts"). The designed pipeline, so the implementer starts from the
+    intended shape rather than inventing one:
+
+    1. Freeze & record: the plan's `plan_id` is stamped on the job attempt
+       (every incident must answer "what did we think, and why").
+    2. Translate: for `workload_mode == "independent_tasks"`, build a
+       lease-backend JobSpec via the matching `recipes.WorkloadRecipe` and
+       POST it to the coordinator (`coordinator_url` or
+       FLASHML_RUNTIME_API). For `coordinated_training`,
+       `strategies.compiler_for(plan).compile(plan)` →
+       `launchers` by `plan.launcher` → launch and watch.
+    3. Return a run handle exposing job_id, state polling, and the ledger
+       event stream — mirroring `LaunchHandle` semantics.
+
+    Until then this raises NotImplementedError so callers fail loudly at
+    the boundary instead of half-running: today you plan with
+    `flash.plan()` and submit the JobSpec yourself (see
+    e2e/test_local_loop.py for the manual pattern).
+    """
+    raise NotImplementedError(
+        "flash.run() is designed but not implemented — build the plan→JobSpec "
+        "translation via recipes/ (Mode A) or strategies/+launchers/ (Mode B); "
+        "see the docstring for the intended pipeline and e2e/test_local_loop.py "
+        "for today's manual equivalent."
+    )
+
 
 # The pre-K8s prototype engine needs numpy; keep it importable exactly as
 # before (flashruntime.Cluster, flashruntime.algorithms, ...) but resolve it

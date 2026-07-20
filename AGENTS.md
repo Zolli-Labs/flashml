@@ -35,7 +35,11 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
 7. **No empty scaffolding.** Create a module only in the vertical slice
    that makes it real (workspace-root `PLAN_2WEEKS.md`). Mode A (leases)
    before Mode B extensions; never reimplement distributed ML — plan,
-   launch, observe, recover.
+   launch, observe, recover. *Amendment (2026-07-19, by user request):*
+   future-work packages carry **complete designed interfaces** (ABCs with
+   full input/output contracts + contract tests in
+   `tests/test_interfaces.py`) instead of docstring stubs — implement
+   against them; change a contract only with a red test + a note.
 8. Ledger is append-only; job/task status is derived from events, never a
    hand-mutated field. Checkpoint manifests are written last, after part
    hashes verify — no manifest, no checkpoint.
