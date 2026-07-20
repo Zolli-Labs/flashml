@@ -10,6 +10,7 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
+    "flashruntime>=0.1",
     "psutil>=5.9",
     "websockets>=12",
     "cryptography>=42",

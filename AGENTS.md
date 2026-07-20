@@ -32,17 +32,49 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
 
 ## Current state (July 2026)
 
-Docstring-only scaffold: each subpackage's `__init__.py` documents what it
-will contain. `agent/cli.py` is a stub entry point. No agent loop yet —
-implementation order is identity → inventory → agent connection → executor →
-telemetry → artifacts → benchmark.
+Working Kubernetes-profile agent: `identity/store.py` (stable node ID on a
+hostPath volume), `inventory/capabilities.py` (psutil + K8s allocatable +
+allow-listed labels), `agent/kube.py` (stdlib-only in-cluster GET of own
+Node), `agent/daemon.py` (register + heartbeat to FlashML Cloud, graceful
+SIGTERM). Runs as `flashnode agent` in a DaemonSet (manifest in
+flashml-cloud/infra/base/flashnode.yaml): non-root, read-only rootfs, no
+runtime socket, RBAC = `get nodes` only. In the Kubernetes profile the agent
+never executes workloads — KubeRay owns workload pods. Tests: `pytest` (28 — includes real-Docker smoke, auto-skipped without a daemon).
+
+## The agent's two profiles
+
+1. **Kubernetes profile** (works today, above): per-node telemetry reporter
+   inside managed pools — register + heartbeat only.
+2. **Device profile** (implemented July 2026, both tiers): `executor/` —
+   `CoordinatorClient` (stdlib urllib, outbound only; sends
+   X-FlashML-Join-Code from FLASHNODE_JOIN_CODE), `SubprocessRunner`
+   (allowlisted modules, wall-clock timeout, **scrubbed env** — only
+   PATH/HOME/PYTHONPATH/LANG/LC_ALL/TMPDIR reach task code),
+   `DockerRunner` (allowlisted images from FLASHNODE_ALLOWED_IMAGES,
+   `--network none`, cpu/mem limits, read-only rootfs, uid mapping;
+   `--runner docker`; on macOS+colima set FLASHNODE_WORKDIR under $HOME —
+   the VM only shares $HOME), `ExecutorLoop` (claim → download inputs →
+   run with attempt-heartbeat thread → upload outputs + sha256 → complete;
+   failures reported via fail(); lease loss discards results;
+   **re-registers automatically** when a node heartbeat is refused after a
+   coordinator restart), and the **checkpoint relay** (`_CheckpointRelay`:
+   agent = courier because tasks are network-isolated — fetch latest
+   manifest → `resume` input before the run; upload→register→commit each
+   new `ckpt/step-*.json` during it, final flush on death). CLI:
+   `flashnode work --coordinator URL`. Tests (28): stubbed transport +
+   real-Docker (auto-skip); full loop + cross-machine training resume in
+   workspace-root `e2e/`. Two heartbeats, never merged: attempt →
+   coordinator (lease liveness), node → registry (online/offline). Wire
+   models from `flashruntime.protocol` (hard rule 2).
+   **Missing/next**: Ed25519 identity, `benchmark/` admission probes,
+   `telemetry/`, gVisor/Kata tiers, `join/status/leave` UX.
 
 ## Dev workflow
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-flashnode            # prints usage from the stub CLI
-pytest               # once tests exist
+flashnode            # usage; `flashnode work` runs the device executor
+pytest               # 28 tests (real-Docker smoke auto-skips)
 ```
 
 Python ≥3.10, asyncio, psutil, websockets, cryptography (Ed25519). Keep the

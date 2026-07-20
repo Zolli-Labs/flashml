@@ -37,7 +37,7 @@ FlashLib. Public materials lead with the component brands **FlashNode**,
 | Product | Repo | Visibility | Role |
 |---|---|---|---|
 | **FlashNode** | `Zolli-Labs/flashnode` | Public (Apache-2.0) | Host agent installed by resource contributors: identity, inventory, benchmarking, sandboxed execution, telemetry, artifact staging, contribution tracking |
-| **FlashRuntime** | `Zolli-Labs/flashruntime` | Public (Apache-2.0) | The workload protocol and execution layer: job specs, task graphs, leases, heartbeats, checkpoint manifests, failure taxonomy, recovery state machine, adapters, CLI/SDK, self-hostable local coordinator |
+| **FlashRuntime** | `Zolli-Labs/flashruntime` | Public (Apache-2.0) | The **reliability runtime** (job specs, task graphs, leases, heartbeats, checkpoint manifests, failure taxonomy, recovery state machine, adapters, CLI/SDK, self-hostable coordinator) plus a **strategy planner** — an explainable feasibility filter that turns model + hardware + budget + deadline into a ranked, explained execution plan. It plans, launches, observes, and recovers; it never reimplements distributed ML |
 | **FlashML Cloud** | `Zolli-Labs/flashml-cloud` | Private (proprietary) | Managed control plane: identity, matching, scheduling, trust and economic policy, billing/credits/payouts, reliability graph, enterprise controls, web dashboard |
 
 Why open/open/closed: the agent runs on other people's machines, so it must be
@@ -96,20 +96,44 @@ An event ledger records every state transition and automated decision.
 
 ## 5. Workload model
 
-**Mode A — fragmented independent tasks** (first and primary mode):
-hyperparameter search, cross-validation, preprocessing shards, offline batch
-inference, synthetic-data generation, sharded K-means, single-node LoRA
-trials. A slow node affects only its task; a lost node causes lease expiry
-and reassignment.
+**Mode 0 — local single-process** (first-class, not a degenerate case): the
+planner's fallback answer ("your job fits on one GPU; distribution would
+cost money for nothing"), the profiling vehicle, and the debugging story. A
+planner that cannot recommend *not distributing* will over-distribute.
+
+**Mode A — fragmented independent tasks** (first and primary distributed
+mode): hyperparameter search, cross-validation, preprocessing shards,
+offline batch inference, synthetic-data generation, sharded K-means,
+single-node LoRA trials. A slow node affects only its task; a lost node
+causes lease expiry and reassignment. This is the lease/heartbeat protocol
+FlashRuntime owns outright — no existing library provides it for machines
+that don't share a network.
 
 **Mode B — coordinated training** (controlled environments only): DDP/FSDP
 jobs inside one provider, data center, or low-latency pool. PyTorch Elastic
 restarts *all* workers on membership change, so the promise is **controlled
 restart with bounded lost work**, never "zero-downtime." Cross-provider
-synchronous training stays a research track.
+synchronous training stays a research track. Recovery here is *borrowed and
+recorded*: Kubernetes replaces machines, the training stack restarts,
+FlashRuntime owns checkpoint selection and the audited timeline.
+
+**Mode C — elastic/semi-synchronous training** (reserved in the schema only):
+per-step fault tolerance without whole-group restart (torchft-class HSDP,
+LocalSGD/DiLoCo). Not built; the StrategyPlan's `recovery_model` enum
+reserves it so it becomes an adapter later, not a schema break.
 
 CPU-first is a validation and distribution wedge, not the endgame. Nothing in
 the public job or node model may hard-code CPU assumptions.
+
+**Library reuse stance** (decided July 2026; rationale in the workspace-root
+`FLASHRUNTIME_EVALUATION.md` and ADR-0003): build **on** torchrun/Elastic
+(Mode B launcher), DDP + FSDP2 (strategy families; FSDP1 skipped —
+deprecated upstream), PyTorch Distributed Checkpoint (checkpoint backend;
+resharding on load), Ray Core (cluster Mode A backend), Hugging Face
+Transformers + PEFT (recipes layer), DeepSpeed later (only for what FSDP2
+lacks: NVMe offload, MoE). Deliberately **not** built on: HF Accelerate
+(overlaps torchrun/strategy config — two owners of one decision) and Ray
+Train (mid V1→V2 migration; too unstable for a public abstraction).
 
 ## 6. Fault tolerance
 
@@ -181,26 +205,37 @@ host Docker socket or privileged mode, complete event logging.
 | Observability | Structured JSON logs, OpenTelemetry, Prometheus-compatible metrics |
 | Identity | Supabase/Clerk auth; internal non-cash credits first |
 
-## 10. Current milestone (3-week build, July 2026)
+## 10. Current milestone: the local loop is DONE (July 2026)
 
-The smallest complete loop, built as a real product rather than a staged demo:
+Two proof points now exist, both recorded in the workspace-root
+`PROGRESS.md`:
 
-1. Hosts install FlashNode (`pip install flashnode`, `flashnode join --code …`)
-   and connect outbound; capability + benchmark registered.
-2. A developer submits a distributed job (hyperparameter search or sharded
-   K-means, 12 trials) via CLI/web.
-3. FlashRuntime expands trials, leases them across nodes; live progress in
-   the dashboard.
-4. One host is killed mid-run. Heartbeat expires, lease invalidates, the task
-   is reassigned, the job completes with every task exactly once.
-5. The result page shows the recovery timeline and credits each host for
-   **accepted** work only.
+1. The original POC (2026-07-17/18, `archive/POC_REPORT.md`): the Mode B loop on
+   simulated devices — submit → KubeRay → kill a worker → automatic
+   replacement and retry → durable artifacts → dashboard timeline.
+2. **The local milestone (2026-07-19): the complete Mode A system, cloud-
+   free**, implemented in the repos and proven by the workspace `e2e/`
+   suite across real process/network boundaries:
+   - Lease coordinator over HTTP with idempotent, **commit-time-validated**
+     results (uploaded output must hash to the claim; bad output = failed
+     attempt, requeued — never accepted).
+   - Durable SQLite lease state: **in-flight leases survive coordinator
+     restarts**; agents re-register automatically.
+   - FlashNode device executor, two tiers (allowlisted subprocess with
+     scrubbed env; allowlisted Docker with `--network none`, cpu/mem
+     limits, read-only rootfs), join codes, coordinator-hosted local
+     artifacts, built-in dashboard.
+   - Three workloads: hyperparameter search (kill-a-machine sweep, 12/12
+     exactly-once with per-node credit), sharded K-means (Lloyd iterations
+     as consecutive lease jobs, converges across two agents), and a
+     **checkpointable trainer with bit-identical resume** — machine B
+     crashes at step 35, machine A resumes from B's relayed step-30
+     checkpoint; the ledger reports 5 steps lost, not 35.
 
-Acceptance criteria: onboarding without inbound ports; remote containerized
-execution; ≥2 hosts concurrent; detection within configured interval;
-automatic requeue and acceptance; exactly-once aggregation; visible
-attempt/failure/reassignment timeline; usage + credits computed from accepted
-work.
+Remaining from the local plan: Stage-8 ledger metrics (MTTD/MTTR/goodput)
++ case study, and a second *physical* machine run (runbook in
+`e2e/README.md`). Next horizon: Stage 5 — the Alibaba deployment (ECS →
+ACK), where the coordinator's address changes and the code does not.
 
 Deferred deliberately: global marketplace, arbitrary GPU/OS support,
 internet-wide synchronous training, learned scheduling, real-money payouts,
@@ -214,6 +249,9 @@ gVisor/Kata isolation, zero-downtime claims.
 - **Weeks 5–12 (usable platform):** orgs/auth/API keys, first provider
   adapter (RunPod / Vast.ai / Kubernetes), trust tiers + placement presets,
   metering, one controlled PyTorch LoRA recovery path, first paying pilot.
+  Plus the standalone planner wedge: `flash plan` for single-node
+  fine-tuning — model + GPUs + budget in, ranked explained plans (with
+  rejections and the arithmetic) out, useful with zero cluster attached.
 - **Months 3–6:** PyTorch Distributed Checkpoint manifests, certified
   FSDP/DeepSpeed or Ray Train envelope, checkpoint scoring, SkyPilot/Kueue/
   Slurm adapter by demand, BYOC deployment mode.

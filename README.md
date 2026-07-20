@@ -21,27 +21,49 @@ agent working in this repo.
 
 ## Status
 
-**Pre-release scaffold.** The package structure and security contract are
-defined; the agent implementation is being built (July 2026).
+**Pre-release; the device executor works today** (July 2026). A machine
+with this agent can join a FlashRuntime coordinator over outbound HTTP,
+pull leased tasks, execute them, relay training checkpoints, and commit
+verified results. Two profiles:
 
-## What it will do
+- **Device profile** (`flashnode work`) — the pull-based executor for
+  laptops/workstations. Implemented.
+- **Kubernetes profile** (`flashnode agent`) — per-node telemetry reporter
+  inside managed pools (DaemonSet); KubeRay owns workload pods there.
+  Implemented.
+
+## What it does today
 
 ```bash
-pip install flashnode
-flashnode join --code HACKATHON-2026
-flashnode status
+pip install -e .                      # plus: pip install -e ../flashruntime
+flashnode work --coordinator http://<coordinator>:8100
+# optional hardening / pool config:
+#   FLASHNODE_JOIN_CODE=...          join-code-gated pools
+#   --runner docker + FLASHNODE_ALLOWED_IMAGES=img:tag,...   container tier
+#   FLASHNODE_WORKDIR=$HOME/.cache/flashnode   (macOS + colima: VM-visible workdirs)
 ```
 
-- Generate an Ed25519 node identity and register with the control plane.
-- Report capabilities (CPU, RAM, disk, OS, optional GPU) and run short
-  admission benchmarks.
-- Maintain an **outbound-only** authenticated WebSocket — no inbound ports,
-  no router configuration.
-- Execute allowlisted container images non-root with explicit CPU, memory,
-  disk, time, and network limits.
-- Stream heartbeats, task progress, and telemetry; stage artifacts with
-  content hashes and idempotent commits.
-- Track accepted work units and contribution credits.
+- Stable node identity; registers with capabilities (CPU, RAM, arch, GPU)
+  and **re-registers automatically** if the coordinator restarts.
+- **Outbound-only** HTTP — no inbound ports, no router configuration.
+- Claims task leases, renews them with attempt heartbeats, and stops work
+  the moment a lease is refused (the coordinator's idempotent commit
+  rejects late duplicates regardless — defense in depth).
+- Two execution tiers behind one interface: `SubprocessRunner`
+  (allowlisted Python modules, wall-clock timeout, **scrubbed
+  environment** — agent secrets never reach task code) and `DockerRunner`
+  (allowlisted images, `--network none`, cpu/memory limits, read-only
+  rootfs, uid mapping).
+- Downloads shared input artifacts; uploads outputs with sha256 for the
+  coordinator's commit-time validation.
+- **Checkpoint courier**: tasks stay network-isolated, so the agent
+  fetches the task's latest valid checkpoint before a run (resume) and
+  ships each new checkpoint file during it — a task killed on this
+  machine resumes from its checkpoint on another.
+
+Still to come: Ed25519-signed identity, admission benchmarks (`benchmark/`),
+richer telemetry (`telemetry/`), gVisor/Kata isolation tiers, and the
+`join`/`status`/`leave` UX.
 
 ## Security contract
 
@@ -60,17 +82,23 @@ Podman, ≥4 CPU cores, ≥8 GB RAM, stable outbound internet.
 
 ## Package layout
 
+Working today:
+
 ```
 flashnode/
-├── agent/       # control connection, lifecycle, CLI
-├── identity/    # Ed25519 keys and registration
-├── inventory/   # hardware/software discovery
-├── benchmark/   # admission and workload probes
-├── executor/    # sandboxed container execution
-├── telemetry/   # heartbeats, metrics, logs
-├── artifacts/   # input/output/checkpoint staging
-└── config/      # host-owner policy and limits
+├── agent/       # CLI (`work`, `agent`), K8s-profile daemon, kube helper
+├── identity/    # stable node ID (Ed25519 signing: planned)
+├── inventory/   # capability discovery (psutil + K8s allocatable)
+└── executor/    # the device work cycle:
+    ├── client.py         # stdlib outbound HTTP: leases, artifacts, checkpoints
+    ├── runner.py         # Tier 1: allowlisted subprocess, scrubbed env
+    ├── docker_runner.py  # Tier 2: allowlisted containers, network-none
+    └── loop.py           # claim → run (heartbeating) → relay ckpts → commit
 ```
+
+Scaffolds awaiting their vertical slice: `benchmark/` (admission probes),
+`telemetry/` (rich metrics), `artifacts/` (local caching), `config/`
+(host-owner policy).
 
 ## License
 
