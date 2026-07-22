@@ -34,3 +34,44 @@ def test_torchrun_world_size_extracted():
     spec = compile_workload(_wl(command="torchrun --nproc-per-node=4 --standalone train.py"))
     assert spec.world_size == 4
     assert spec.argv[0] == "torchrun"
+
+
+def test_torchrun_world_size_space_separated():
+    from flashruntime.strategies.command import compile_workload
+
+    spec = compile_workload(_wl(command="torchrun --nproc-per-node 4 --standalone train.py"))
+    assert spec.world_size == 4
+    assert spec.argv[0] == "torchrun"
+
+
+def test_torchrun_world_size_underscore_spelling():
+    from flashruntime.strategies.command import compile_workload
+
+    eq = compile_workload(_wl(command="torchrun --nproc_per_node=4 train.py"))
+    assert eq.world_size == 4
+    sp = compile_workload(_wl(command="torchrun --nproc_per_node 4 train.py"))
+    assert sp.world_size == 4
+
+
+def test_torchrun_non_integer_world_size_does_not_crash():
+    from flashruntime.strategies.command import compile_workload
+
+    spec = compile_workload(_wl(command="torchrun --nproc-per-node=gpu train.py"))
+    assert spec.world_size == 1
+    assert any("world_size unresolved" in n for n in spec.notes)
+    assert any("--nproc-per-node=gpu" in n for n in spec.notes)
+
+
+def test_non_torchrun_command_defaults_world_size_one():
+    from flashruntime.strategies.command import compile_workload
+
+    spec = compile_workload(_wl(command="python train.py --nproc-per-node=8"))
+    assert spec.world_size == 1
+
+
+def test_env_passthrough_untouched_when_params_none():
+    from flashruntime.strategies.command import compile_workload
+
+    wl = _wl(env={"CFG": "{unresolved}", "TAG": "static"})
+    spec = compile_workload(wl)
+    assert spec.env == {"CFG": "{unresolved}", "TAG": "static"}
