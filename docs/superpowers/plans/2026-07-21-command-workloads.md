@@ -2611,7 +2611,11 @@ never the required path.]
 
 - [ ] **Step 2: Add pointers**
 
-- `README.md`: under the Quickstart sections add one line: `- **Bring your own code** (sklearn / PyTorch / Hugging Face): [docs/guides/bring-your-code.md](docs/guides/bring-your-code.md)`
+- `README.md`: under the Quickstart sections add one line linking the new
+  guide — `- **Bring your own code** (sklearn / PyTorch / Hugging Face):` with
+  a relative markdown link whose target is `docs/guides/bring-your-code.md`
+  (spelled as a link in README.md itself, not here — the doc-link checker
+  runs against committed files and the guide lands in this same task).
 - `AGENTS.md` "Current state" list, append one bullet summarizing: `workloads/` + `flash.submit`, first concrete launcher/recipe, `integrations/`, `flashruntime.torch`, isolation-aware claim (fail-closed), and the flashnode argv-runner dependency for service-side execution.
 
 - [ ] **Step 3: Follow the workspace logging protocol**
