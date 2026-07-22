@@ -13,6 +13,19 @@ def _task(task_id: str, tier: str | None = None, allow_fallback: bool = False):
     return TaskSpec(task_id=task_id, job_id="j1", commit_key=f"j1/{task_id}", payload=payload)
 
 
+def _task_raw(task_id: str, isolation):
+    """Build a task with a *raw* isolation payload (any JSON type) so tests can
+    poison it with type-confused values the protocol would never emit."""
+    from flashruntime.protocol.v1alpha1 import TaskSpec
+
+    return TaskSpec(
+        task_id=task_id,
+        job_id="j1",
+        commit_key=f"j1/{task_id}",
+        payload={"isolation": isolation},
+    )
+
+
 def test_eligibility_matrix():
     from flashruntime.scheduler import IsolationAwarePlacement
 
@@ -57,3 +70,84 @@ def test_claim_without_policy_is_unchanged():
     mgr.add_task(_task("first"))
     mgr.add_task(_task("second"))
     assert mgr.claim("n1").task_id == "first"  # FIFO, exactly as before
+
+
+# -- fail-closed hardening (type-confusion): security-review fix round 1 -------
+
+
+def test_allow_fallback_json_string_false_does_not_waive():
+    """A JSON-string 'false' is truthy in Python; it must NOT waive the gate.
+    Only a genuine boolean True waives (AGENTS.md rule 3, fail closed)."""
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    policy = IsolationAwarePlacement()
+    incapable = {"node_id": "n2", "sandbox_capable": False}
+    task = _task_raw("t", {"tier": "sandboxed", "allowFallback": "false"})
+    assert not policy.eligible(task, incapable)
+
+
+def test_sandbox_capable_json_string_false_is_not_capable():
+    """A node advertising the string 'false' is truthy in Python but must
+    read as NOT capable — only a genuine boolean True counts as capable."""
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    policy = IsolationAwarePlacement()
+    node_str_false = {"node_id": "n2", "sandbox_capable": "false"}
+    assert not policy.eligible(_task("t", tier="sandboxed"), node_str_false)
+
+
+def test_non_dict_isolation_is_ineligible_everywhere():
+    """A type-confused isolation payload (present but not a dict) must fail
+    closed — ineligible on every node, and never crash the predicate."""
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    policy = IsolationAwarePlacement()
+    capable = {"node_id": "n1", "sandbox_capable": True}
+    incapable = {"node_id": "n2", "sandbox_capable": False}
+    poisoned = _task_raw("t", "sandboxed")  # a bare string, not a dict
+    assert not policy.eligible(poisoned, capable)
+    assert not policy.eligible(poisoned, incapable)
+
+
+def test_claim_over_poisoned_queue_serves_clean_task():
+    """A poisoned task (non-dict isolation) must not crash choose() and block
+    the whole queue — the other clean pending task is still served."""
+    from flashruntime.leases import LeaseManager
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    mgr = LeaseManager()
+    mgr.add_task(_task_raw("t-poison", "sandboxed"))  # head-of-queue, poisoned
+    mgr.add_task(_task("t-clean"))  # standard ⇒ eligible everywhere
+    policy = IsolationAwarePlacement()
+
+    lease = mgr.claim("n1", policy=policy, node={"node_id": "n1", "sandbox_capable": True})
+    assert lease is not None
+    assert lease.task_id == "t-clean"
+
+
+def test_unknown_tier_string_requires_capability():
+    """An unknown/typo'd tier (e.g. 'Sandboxed') must be treated like the
+    sandboxed gate, not silently downgraded to run-anywhere."""
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    policy = IsolationAwarePlacement()
+    capable = {"node_id": "n1", "sandbox_capable": True}
+    incapable = {"node_id": "n2", "sandbox_capable": False}
+    task = _task("t", tier="Sandboxed")  # capitalised typo ⇒ NOT run-anywhere
+    assert policy.eligible(task, capable)
+    assert not policy.eligible(task, incapable)
+
+
+def test_claim_with_foreign_spec_policy_returns_none():
+    """A custom policy returning a spec that is not among the pending records
+    must yield a clean None, not a StopIteration crash."""
+    from flashruntime.leases import LeaseManager
+    from flashruntime.protocol.v1alpha1 import TaskSpec
+
+    class ForeignSpecPolicy:
+        def choose(self, pending, node):
+            return TaskSpec(task_id="ghost", job_id="j1", commit_key="j1/ghost")
+
+    mgr = LeaseManager()
+    mgr.add_task(_task("real"))
+    assert mgr.claim("n1", policy=ForeignSpecPolicy(), node={"node_id": "n1"}) is None

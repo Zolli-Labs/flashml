@@ -109,7 +109,9 @@ class LeaseManager:
             chosen = policy.choose([r.spec for r in pending], node or {"node_id": node_id})
             record = None
             if chosen is not None:
-                record = next(r for r in pending if r.spec.task_id == chosen.task_id)
+                # default None: a policy that returns a foreign/unknown spec
+                # falls through to the `record is None` path below, not StopIteration.
+                record = next((r for r in pending if r.spec.task_id == chosen.task_id), None)
         if record is None:
             return None
         record.attempts_used += 1

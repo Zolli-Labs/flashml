@@ -91,16 +91,36 @@ class FifoPlacement(PlacementPolicy):
 
 class IsolationAwarePlacement(PlacementPolicy):
     """FIFO plus the one fail-closed capability gate the isolation contract
-    requires: a task whose payload demands `sandboxed` execution may only
-    go to a node advertising `sandbox_capable` — an ABSENT capability
-    counts as NOT capable (security-relevant fields fail closed, AGENTS.md
-    rule 3). The task's own `allowFallback: true` waives the requirement
-    explicitly. Everything else keeps the fail-open placement default."""
+    requires: a task whose payload demands sandboxed execution may only go
+    to a node advertising `sandbox_capable` — an ABSENT capability counts as
+    NOT capable (security-relevant fields fail closed, AGENTS.md rule 3).
+
+    The gate requires *true booleans*; type-confused values fail closed:
+
+    - A node is capable only when `sandbox_capable is True`. A truthy
+      stand-in (the JSON string ``"false"``, ``1``, ``"yes"``) does NOT
+      count as capable.
+    - The task's own `allowFallback` waives the requirement only when it is
+      exactly `True`; any other value (including the string ``"false"``)
+      does not waive.
+    - The isolation payload must be a mapping. If it is present but not a
+      dict (e.g. the bare string ``"sandboxed"``), the task is ineligible
+      everywhere — fail closed without crashing the predicate.
+    - Only tiers `None` / ``""`` / ``"standard"`` run anywhere. ANY other
+      tier value (an unknown or mistyped literal like ``"Sandboxed"``) is
+      treated like ``"sandboxed"`` and requires capability — no silent
+      downgrade to unsandboxed placement.
+
+    Everything genuinely standard keeps the fail-open placement default."""
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
-        isolation = task.payload.get("isolation") or {}
-        if isolation.get("tier") != "sandboxed":
-            return True
-        if isolation.get("allowFallback"):
-            return True
-        return bool(node.get("sandbox_capable"))
+        isolation = task.payload.get("isolation")
+        if isolation is None:
+            return True  # no isolation payload ⇒ standard, runs anywhere
+        if not isinstance(isolation, dict):
+            return False  # type-confused payload ⇒ fail closed, no crash
+        if isolation.get("tier") in (None, "", "standard"):
+            return True  # only the known non-isolated tiers run anywhere
+        if isolation.get("allowFallback") is True:
+            return True  # explicit waiver — genuine boolean only
+        return node.get("sandbox_capable") is True  # capable ⇒ genuine boolean only
