@@ -62,6 +62,9 @@ def test_kill_and_resume_reproduces_uninterrupted_result(tmp_path):
     import flashruntime as flash
     from flashruntime.integrations import pytorch as fr_torch
 
+    # kill/checkpoint steps must be epoch boundaries (8 batches/rank/epoch in
+    # the example: 512/32/2) or the resumed run replays different batches and
+    # the abs=1e-6 comparison below legitimately fails — see train.py docstring
     def ddp(extra: str = ""):
         return fr_torch.ddp(
             "train.py",

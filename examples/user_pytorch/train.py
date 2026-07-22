@@ -7,8 +7,16 @@ three ways:
     torchrun --nproc-per-node=2 --standalone train.py    # DDP by hand
     flash.submit(integrations.pytorch.ddp(...))          # operated by FlashRuntime
 
-Deterministic on CPU (fixed seeds, no shuffle) so a killed-and-resumed run
-reproduces the uninterrupted result — recovery must not change the math.
+Deterministic on CPU (fixed seeds; under DDP, ft.prepare swaps in a seed-0
+DistributedSampler whose order repeats every epoch) so a killed-and-resumed
+run reproduces the uninterrupted result — recovery must not change the math.
+
+Bit-exact resume has one alignment constraint: on resume the `for` loop
+restarts the dataloader at batch 0, so the resumed step must sit on an
+epoch boundary — a multiple of batches-per-rank-per-epoch (here
+512 samples / 32 batch / 2 ranks = 8). Keep --checkpoint-every and
+--kill-at-step multiples of 8 (×2 ranks) or the 1e-6 loss comparison in
+tests/test_examples_e2e.py will drift.
 """
 import argparse
 import json
