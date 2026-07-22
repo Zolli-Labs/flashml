@@ -84,14 +84,32 @@ class LeaseManager:
     # -- worker side --------------------------------------------------------
 
     def claim(
-        self, node_id: str, job_id: str | None = None, now: datetime | None = None
+        self,
+        node_id: str,
+        job_id: str | None = None,
+        now: datetime | None = None,
+        policy: object | None = None,
+        node: dict | None = None,
     ) -> Lease | None:
         """Claim the next PENDING task for `node_id`, or None when nothing is
         claimable. Expired leases are swept first so a claim never starves
-        behind a dead worker."""
+        behind a dead worker.
+
+        `policy`/`node` are the scheduler seam (flashruntime/scheduler):
+        the store yields queue-ordered candidates, the policy filters and
+        picks. Duck-typed (`choose(pending_specs, node) -> TaskSpec|None`)
+        so this package gains no scheduler import. Without a policy,
+        behavior is bit-identical to the original FIFO claim."""
         now = now or _utcnow()
         self.sweep(now=now)
-        record = self._store.next_pending(job_id)
+        if policy is None:
+            record = self._store.next_pending(job_id)
+        else:
+            pending = [r for r in self._store.all(job_id) if r.state == TaskState.PENDING]
+            chosen = policy.choose([r.spec for r in pending], node or {"node_id": node_id})
+            record = None
+            if chosen is not None:
+                record = next(r for r in pending if r.spec.task_id == chosen.task_id)
         if record is None:
             return None
         record.attempts_used += 1

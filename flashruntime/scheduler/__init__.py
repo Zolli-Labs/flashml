@@ -26,7 +26,7 @@ from typing import Any
 
 from flashruntime.protocol.v1alpha1 import TaskSpec
 
-__all__ = ["PlacementPolicy", "FifoPlacement"]
+__all__ = ["PlacementPolicy", "FifoPlacement", "IsolationAwarePlacement"]
 
 #: A node as the policy sees it: the registry's view dict
 #: ({"node_id", "capabilities": {...}, ...}). Kept as a mapping (not a
@@ -87,3 +87,20 @@ class FifoPlacement(PlacementPolicy):
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
         return True
+
+
+class IsolationAwarePlacement(PlacementPolicy):
+    """FIFO plus the one fail-closed capability gate the isolation contract
+    requires: a task whose payload demands `sandboxed` execution may only
+    go to a node advertising `sandbox_capable` — an ABSENT capability
+    counts as NOT capable (security-relevant fields fail closed, AGENTS.md
+    rule 3). The task's own `allowFallback: true` waives the requirement
+    explicitly. Everything else keeps the fail-open placement default."""
+
+    def eligible(self, task: TaskSpec, node: NodeView) -> bool:
+        isolation = task.payload.get("isolation") or {}
+        if isolation.get("tier") != "sandboxed":
+            return True
+        if isolation.get("allowFallback"):
+            return True
+        return bool(node.get("sandbox_capable"))
