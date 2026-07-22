@@ -31,6 +31,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
+import flashruntime.recipes.command  # noqa: F401 — registers the "command" recipe
 from flashruntime.leases import LeaseManager
 from flashruntime.protocol.v1alpha1 import (
     ArtifactRecord,
@@ -40,6 +41,8 @@ from flashruntime.protocol.v1alpha1 import (
     TaskSpec,
     TaskState,
 )
+from flashruntime.recipes import recipe_for
+from flashruntime.scheduler import IsolationAwarePlacement
 
 NODE_OFFLINE_AFTER_S = 15.0
 
@@ -67,6 +70,15 @@ def expand_tasks(job_id: str, spec: JobSpec) -> list[TaskSpec]:
       lease_seconds: heartbeat window per attempt (default 60)
     """
     workload = spec.spec.workload
+    try:
+        recipe = recipe_for(workload.type)
+    except LookupError:
+        recipe = None
+    if recipe is not None:
+        try:
+            return recipe.expand(job_id, spec)
+        except ValueError as exc:
+            raise ExpansionError(str(exc)) from None
     if workload.type == "sharded_kmeans":
         return _expand_kmeans(job_id, spec)
     if workload.type != "hyperparameter_search":
@@ -262,9 +274,20 @@ def build_router(state: ModeAState) -> APIRouter:
 
     @router.post("/leases/claim")
     async def claim(req: ClaimRequest):
-        if req.node_id not in state.nodes:
+        entry = state.nodes.get(req.node_id)
+        if entry is None:
             raise HTTPException(status_code=403, detail="unregistered node — register first")
-        lease = manager.claim(req.node_id, job_id=req.job_id)
+        node_view = {
+            "node_id": req.node_id,
+            "sandbox_capable": entry.registration.sandbox_capable,
+            "capabilities": entry.registration.capabilities.model_dump(),
+        }
+        lease = manager.claim(
+            req.node_id,
+            job_id=req.job_id,
+            policy=IsolationAwarePlacement(),
+            node=node_view,
+        )
         if lease is None:
             return Response(status_code=204)  # nothing claimable right now
         return lease
