@@ -176,6 +176,12 @@ What each does:
   the newest *valid* checkpoint manifest if one exists, setting the resume
   step. Launched as plain `python train.py`, it is a no-op passthrough.
 
+  **GPU DDP is a later slice.** `prepare` *selects* `nccl` when CUDA is present
+  but does **not** yet move your model to the device for you — multi-GPU DDP is
+  not exercised end-to-end. The proven path today is CPU / `gloo` (what the e2e
+  tests run); on GPU you still call `model.to(device)` yourself, and treat the
+  distributed GPU wiring as unverified until that slice lands.
+
   One caveat worth knowing: `prepare` rebuilds the DataLoader carrying over
   `batch_size`, `collate_fn`, `num_workers`, and `drop_last` — **`shuffle` and
   `pin_memory` are not carried over** (the `DistributedSampler` owns shuffling,
@@ -224,6 +230,15 @@ last valid checkpoint manifest:
 
 The resumed run reports `resumed_from` > 0 — recovery, not a restart. (The
 torch parts skip automatically when `torch`/`torchrun` are not installed.)
+
+> **Warning — one `output_dir` is one workload.** Resume works by reusing the
+> job-scoped checkpoint tree at `<output_dir>/local/ckpt`. Point a *different*
+> workload at an `output_dir` that already holds another workload's checkpoints
+> and `prepare()` will happily restore those foreign weights — silent, wrong
+> results, not an error. Use a **fresh `output_dir` per workload**; reusing one
+> for the *same* workload is exactly how kill-and-resume is meant to work.
+> (Fan-out sweeps are safe automatically: each trial gets its own
+> `local-NNN/ckpt` tree, so trials never cross-contaminate.)
 
 **Guardrail (ADR-0003 — do not rebuild Accelerate).** `flashruntime.torch`
 wraps torch's *own* DDP and stops. There are no FSDP policies, no autocast, no

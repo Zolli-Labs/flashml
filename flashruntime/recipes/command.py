@@ -65,7 +65,11 @@ class CommandRecipe(WorkloadRecipe):
                 task_env = {
                     k: (v.format(**params) if params else v) for k, v in env.items()
                 }
-            except KeyError as exc:
+            except (KeyError, IndexError, ValueError) as exc:
+                # KeyError: a named {placeholder} with no matching param.
+                # IndexError/ValueError: an auto/positional field ({}, {0}) or
+                # a malformed brace str.format cannot fill from a params dict.
+                # All are user-input errors → ValueError (→422), never a 500.
                 raise ValueError(
                     f"task {i}: placeholder {exc} has no value in task_params[{i}]"
                 ) from None

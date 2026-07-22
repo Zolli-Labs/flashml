@@ -97,3 +97,47 @@ def test_stale_outputs_from_previous_trial_not_recollected(tmp_path):
         output_dir=tmp_path / "out",
     )
     assert [t["x"] for t in run.trials] == [1]
+
+
+def test_fanout_trials_get_isolated_ckpt_dirs(tmp_path):
+    """F4: each fan-out trial must get its OWN checkpoint tree — a shared
+    FLASHML_CKPT_DIR could restore one trial's weights into another."""
+    import flashruntime as flash
+
+    source = _write_script(
+        tmp_path,
+        """
+        import os, json
+        json.dump({"ckpt": os.environ["FLASHML_CKPT_DIR"]}, open("metrics.json", "w"))
+        """,
+    )
+    run = flash.submit(
+        flash.CommandWorkload(
+            command=f"{sys.executable} train.py --x {{x}}",
+            source={"path": source},
+            task_params=[{"x": 1}, {"x": 2}],
+        ),
+        output_dir=tmp_path / "out",
+    )
+    ckpts = {t["ckpt"] for t in run.trials}
+    assert len(ckpts) == 2  # two trials, two distinct ckpt trees
+
+
+def test_non_fanout_uses_shared_local_ckpt_dir(tmp_path):
+    """F4 guard: the non-fanout path must keep the stable `local` job id so
+    a resubmit against the same output_dir resumes (the resume e2e depends
+    on <out>/local/ckpt)."""
+    import flashruntime as flash
+
+    source = _write_script(
+        tmp_path,
+        """
+        import os, json
+        json.dump({"ckpt": os.environ["FLASHML_CKPT_DIR"]}, open("metrics.json", "w"))
+        """,
+    )
+    run = flash.submit(
+        flash.CommandWorkload(command=f"{sys.executable} train.py", source={"path": source}),
+        output_dir=tmp_path / "out",
+    )
+    assert run.trials[0]["ckpt"] == str(tmp_path / "out" / "local" / "ckpt")

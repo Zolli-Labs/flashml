@@ -65,9 +65,14 @@ def submit(workload: CommandWorkload, output_dir: str | Path | None = None) -> R
     states: list[LaunchState] = []
     for i, params in enumerate(param_sets):
         attempt_id = f"task-{i:03d}"
+        # Fan-out trials are DIFFERENT workloads (distinct params) — each needs
+        # its own checkpoint tree, or trial i could restore trial j's weights
+        # (FLASHML_CKPT_DIR is per job id). The single-workload path keeps the
+        # stable "local" id so a resubmit against the same output_dir resumes.
+        job_id = f"local-{i:03d}" if fanout else _JOB_ID
         spec = compile_workload(workload, params)
         started_at = time.time()
-        handle = launcher.launch(spec, _JOB_ID, attempt_id)
+        handle = launcher.launch(spec, job_id, attempt_id)
         state = handle.wait()
         states.append(state)
         run._logs.append(f"--- {attempt_id} ({state.value}) ---\n{handle.logs()}")

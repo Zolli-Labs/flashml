@@ -63,9 +63,13 @@ class LaunchSpec(BaseModel):
     )
     files: dict[str, str] = Field(
         default_factory=dict,
-        description="Config files to materialize in the workdir before "
-        "launch, name → content (e.g. 'ds_config.json' for DeepSpeed). "
-        "Keeps compilation pure while supporting file-driven frameworks.",
+        description="Config files to materialize into the attempt OUTPUT dir "
+        "(the one exported as FLASHML_OUTPUT_DIR) before launch, name → "
+        "content (e.g. 'ds_config.json' for DeepSpeed). Keeps compilation "
+        "pure while supporting file-driven frameworks. Note: files land in "
+        "the output dir, NOT the command's cwd — wiring cwd-reading "
+        "frameworks to find them is a flagged follow-up to settle before any "
+        "files-emitting compiler ships.",
     )
     world_size: int = Field(default=1, ge=1, description="Total processes across all nodes")
     gpus_per_process: int = Field(default=0, ge=0)

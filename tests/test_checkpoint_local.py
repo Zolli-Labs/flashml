@@ -54,3 +54,17 @@ def test_no_checkpoints_is_none(tmp_path):
     from flashruntime.checkpoint.local import latest_valid_manifest
 
     assert latest_valid_manifest(tmp_path / "missing") is None
+
+
+def test_manifest_that_is_a_directory_does_not_crash_scan(tmp_path):
+    """A step dir whose manifest.json is itself a DIRECTORY makes read_text
+    raise IsADirectoryError (an OSError subclass). The scan must treat that
+    manifest as nonexistent and fall back to the last good one, never crash."""
+    from flashruntime.checkpoint.local import MANIFEST_NAME, latest_valid_manifest
+
+    _make_step(tmp_path, 10)
+    bad = tmp_path / "step-000020"
+    bad.mkdir()
+    (bad / "model.pt").write_bytes(b"weights")
+    (bad / MANIFEST_NAME).mkdir()  # manifest.json is a directory ⇒ read_text raises OSError
+    assert latest_valid_manifest(tmp_path).step == 10

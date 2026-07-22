@@ -104,6 +104,13 @@ def expand_tasks(job_id: str, spec: JobSpec) -> list[TaskSpec]:
             raise ExpansionError(f"input '{name}' must be an artifact:// URI, got {uri!r}")
 
     checkpoint = p.get("checkpoint")  # non-None turns the executor's relay on
+    # Stamp the isolation requirement so the placement gate can fail closed —
+    # a sandboxed job must never lease to a non-sandbox node (mirrors
+    # recipes/command.py; the legacy expansions were dropping this).
+    isolation = {
+        "tier": spec.spec.isolation.tier,
+        "allowFallback": spec.spec.isolation.allowFallback,
+    }
     tasks = []
     for i, params in enumerate(trials):
         task_id = f"trial-{i:03d}"
@@ -115,6 +122,7 @@ def expand_tasks(job_id: str, spec: JobSpec) -> list[TaskSpec]:
             "task_id": task_id,
             # the docker-runner tier resolves and allowlists this
             "image": spec.spec.image.reference,
+            "isolation": isolation,
         }
         if checkpoint is not None:
             payload["checkpoint"] = checkpoint
@@ -145,6 +153,12 @@ def _expand_kmeans(job_id: str, spec: JobSpec) -> list[TaskSpec]:
         if not str(uri).startswith("artifact://"):
             raise ExpansionError(f"shard must be an artifact:// URI, got {uri!r}")
     iteration = int(p.get("iteration", 0))
+    # Same fail-closed stamp as the hyperparameter_search path (mirrors
+    # recipes/command.py) — without it a sandboxed job leases anywhere.
+    isolation = {
+        "tier": spec.spec.isolation.tier,
+        "allowFallback": spec.spec.isolation.allowFallback,
+    }
 
     tasks = []
     for i, shard_uri in enumerate(shards):
@@ -163,6 +177,7 @@ def _expand_kmeans(job_id: str, spec: JobSpec) -> list[TaskSpec]:
                     "output_prefix": f"jobs/{job_id}/{task_id}/",
                     "task_id": task_id,
                     "image": spec.spec.image.reference,
+                    "isolation": isolation,
                 },
             )
         )

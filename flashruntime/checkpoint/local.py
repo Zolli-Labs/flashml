@@ -81,13 +81,20 @@ def latest_valid_manifest(ckpt_root: Path, pattern: str = "step-*") -> Checkpoin
     for mf_path in ckpt_root.glob(f"{pattern}/{MANIFEST_NAME}"):
         try:
             manifest = CheckpointManifest.model_validate_json(mf_path.read_text())
-        except ValueError:
-            continue  # unreadable manifest: treat as nonexistent
+        except (OSError, ValueError):
+            # unreadable/invalid manifest (bad JSON, or manifest.json is a
+            # directory / unreadable file → OSError): treat as nonexistent
+            continue
         step_dir = mf_path.parent
-        intact = all(
-            (step_dir / part.key).is_file() and _sha256(step_dir / part.key) == part.sha256
-            for part in manifest.parts
-        )
+        try:
+            intact = all(
+                (step_dir / part.key).is_file() and _sha256(step_dir / part.key) == part.sha256
+                for part in manifest.parts
+            )
+        except (OSError, ValueError):
+            # a part we cannot re-hash (directory, unreadable, gone): the
+            # manifest cannot be verified ⇒ treat it as invalid, keep scanning
+            continue
         if intact and (best is None or manifest.step > best.step):
             best = manifest
     return best
