@@ -8,3 +8,6 @@ build/
 .env
 .DS_Store
 *.db
+# examples write metrics.json into their own dir (cwd) when run; it is a
+# generated artifact the SDK copies out — never commit the stray original.
+examples/*/metrics.json
