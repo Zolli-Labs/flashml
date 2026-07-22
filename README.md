@@ -119,6 +119,14 @@ uv pip install -e ".[sklearn,dev]"
 python examples/local_kmeans_and_linear_regression.py
 ```
 
+## Bring your own code
+
+FlashRuntime operates *your* training job — no rewrite. Run an existing
+repository locally with `flash.submit()` (sklearn sweeps, PyTorch DDP, Hugging
+Face), or compile it to a JobSpec for a coordinator:
+
+- **Bring your own code** (sklearn / PyTorch / Hugging Face): [docs/guides/bring-your-code.md](docs/guides/bring-your-code.md)
+
 ## Testing
 
 ```bash

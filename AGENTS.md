@@ -89,9 +89,25 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   `execution.backend: leases`), derived job states + 2 s sweeper, and a
   self-contained dashboard at `GET /` (`service/dashboard.py`). KubeRay is
   optional: `FLASHML_ENABLE_KUBERAY=0` runs the coordinator cloud-free.
-- Tests: `pytest` (109 unit; integration suite opt-in via `-m integration`,
-  lives in `tests/integration/` with env auto-skip). Images: `deploy/docker/`.
-  Full-loop proof: workspace-root `e2e/` (`make e2e`, `make e2e-demo`).
+- `workloads/` + `flash.submit` = bring-your-own-code (July 2026):
+  `CommandWorkload` (framework-neutral "run this command"; `argv()`,
+  `to_jobspec()`) + `flash.submit(workload, output_dir=None) → Run`
+  (synchronous local compile→launch→wait→collect). First concrete
+  launcher (`launchers/local.py`), recipe (`recipes/command.py`), and
+  strategy compiler (`strategies/command.py` — a function, not a
+  `StrategyCompiler`, since a StrategyPlan carries no argv). Thin
+  framework adapters in `integrations/` (sklearn sweeps, pytorch DDP, HF
+  Trainer callback — no framework imports at module level) + the optional
+  in-script `flashruntime.torch` helper (7-fn surface: prepare/checkpoint/
+  log_metrics/rank/world_size/is_main/start_step; wraps torch's own DDP and
+  stops — ADR-0003 guardrail). Service-side command jobs expand + lease
+  with fail-closed sandbox placement (`scheduler.IsolationAwarePlacement`);
+  **executing** the `argv` payload waits on flashnode's argv runner tier
+  (cross-repo). User-facing guide: `docs/guides/bring-your-code.md`.
+- Tests: `pytest` (integration suite opt-in via `-m integration`, lives in
+  `tests/integration/` with env auto-skip). Images: `deploy/docker/`.
+  Full-loop proof: workspace-root `e2e/` (`make e2e`, `make e2e-demo`) +
+  in-repo `tests/test_examples_e2e.py` (4 real bring-your-code e2e tests).
   POC runbook: workspace-root `archive/POC_PLAN.md` + Makefile.
 
 ## Status vs. plan (what's done, what's missing)
