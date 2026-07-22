@@ -67,6 +67,13 @@ __all__ = [
     "JobEvent",
     "algorithms",
     "registered_providers",
+    # bring-your-own-code SDK (lazy — stdlib+pydantic only, but kept lazy
+    # so `import flashruntime` stays minimal)
+    "submit",
+    "CommandWorkload",
+    "OutputSpec",
+    "Source",
+    "integrations",
 ]
 
 def run(plan: StrategyPlan, coordinator_url: str | None = None):
@@ -105,6 +112,15 @@ def run(plan: StrategyPlan, coordinator_url: str | None = None):
 # lazily (PEP 562) so the pydantic-only core never pays for it.
 _PROTOTYPE_EXPORTS = {"Cluster", "Job", "JobEvent", "algorithms", "registered_providers"}
 
+# SDK exports resolve lazily too: name -> (module, attribute).
+_SDK_EXPORTS = {
+    "submit": ("flashruntime.sdk", "submit"),
+    "CommandWorkload": ("flashruntime.workloads.command", "CommandWorkload"),
+    "OutputSpec": ("flashruntime.workloads.command", "OutputSpec"),
+    "Source": ("flashruntime.workloads.command", "Source"),
+    "integrations": ("flashruntime.integrations", None),
+}
+
 
 def __getattr__(name: str) -> Any:
     if name in _PROTOTYPE_EXPORTS:
@@ -130,4 +146,12 @@ def __getattr__(name: str) -> Any:
         }
         globals().update(exports)
         return exports[name]
+    if name in _SDK_EXPORTS:
+        import importlib
+
+        module_name, attr = _SDK_EXPORTS[name]
+        module = importlib.import_module(module_name)
+        value = module if attr is None else getattr(module, attr)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module 'flashruntime' has no attribute {name!r}")
