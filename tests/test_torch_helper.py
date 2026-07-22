@@ -58,7 +58,7 @@ def test_checkpoint_then_resume_restores_weights_and_step(ft):
     fresh = torch.nn.Linear(4, 2)
     fresh_opt = torch.optim.SGD(fresh.parameters(), lr=0.1)
     m2, _, _ = ft.prepare(fresh, fresh_opt, None)
-    assert float(m2.weight[0, 0]) == pytest.approx(3.14)
+    assert float(m2.weight.detach()[0, 0]) == pytest.approx(3.14)
     assert ft.start_step() == 5
 
 
