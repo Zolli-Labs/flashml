@@ -39,10 +39,12 @@ class Run:
 
     Lock discipline (stated once, here): a `wait=False` submit drives the
     launch loop on a daemon thread while the caller reads state/events live.
-    A single `threading.Lock` (`_lock`) guards every mutable field
-    (`state`, `finished_at`, `_events`, `_attempts`, `trials`) *and* the
-    run.json write, so the file is always serialized from a consistent
-    snapshot and a concurrent reader never observes a half-updated Run.
+    A single `threading.Lock` (`_lock`) guards the live-read fields
+    (`state`, `finished_at`, `_events`, `_attempts`) *and* the run.json
+    write, so the file is always serialized from a consistent snapshot and
+    a concurrent reader never observes a half-updated Run. `trials`,
+    `artifacts`, and `_logs` are mutated only by the single driver thread
+    and serialized only under the lock — they need no lock of their own.
     Readers take copies under the lock; the driver holds it only for the
     brief mutate-then-persist critical section. `_done` (a `threading.Event`)
     is set exactly once, on the terminal transition, so `wait()` blocks
