@@ -23,3 +23,5 @@ Reference:
   - reference/integrations.md
   - reference/torch-helper.md
   - reference/cli.md
+Benchmarks:
+  - benchmarks.md

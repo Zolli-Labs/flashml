@@ -1,0 +1,108 @@
+{
+  "schema": "bench_v1",
+  "host": {
+    "os": "macOS-26.5.1-arm64-arm-64bit",
+    "cpu": "Apple M4",
+    "cores": 10,
+    "ram_gb": 16.0,
+    "python": "3.11.15",
+    "torch": "2.13.0",
+    "flashruntime": "0.1.0"
+  },
+  "rows": [
+    {
+      "scenario": "adoption_cost",
+      "unit": "lines to adopt",
+      "median": 7.0,
+      "p10": 7.0,
+      "p90": 7.0,
+      "repeats": 5,
+      "comparators": {
+        "accelerate_adopt_loc": 8.0,
+        "flashruntime_core_deps": 2.0,
+        "flashruntime_import_ms": 72.1,
+        "torch_import_ms": 480.1
+      },
+      "notes": [
+        "adoption LOC = inserted/changed non-blank lines from a vanilla script to its framework-ready form (difflib); snippets are cited from each project's own docs",
+        "LOC is deterministic \u2014 repeats do not vary it (import time is the median of 5 subprocess timings)",
+        "ray not installed \u2014 import-time/dep-count comparator skipped",
+        "accelerate not installed \u2014 import-time/dep-count comparator skipped"
+      ]
+    },
+    {
+      "scenario": "hpo_sweep",
+      "unit": "seconds",
+      "median": 5.406,
+      "p10": 5.37,
+      "p90": 5.469,
+      "repeats": 5,
+      "comparators": {
+        "sequential_s": 5.295,
+        "peak_child_rss_mb": 200.2,
+        "flash_setup_loc": 10.0,
+        "sequential_setup_loc": 16.0,
+        "ray_tune_setup_loc": 22.0
+      },
+      "notes": [
+        "flash.submit runs trials SEQUENTIALLY locally, so wall-clock \u2248 the for-loop baseline; flashruntime's HPO value is orchestration + result collection + fault-tolerance, not local parallelism",
+        "peak RSS is a shared RUSAGE_CHILDREN high-water mark across all trials (largest single child)",
+        "ray.tune wall-clock is NOT measured here (ray not installed \u2014 a heavy, throwaway-venv comparator); its setup LOC is counted from the committed, cited snippet ray_tune_hpo.py"
+      ]
+    },
+    {
+      "scenario": "launch_overhead",
+      "unit": "seconds",
+      "median": 0.0681,
+      "p10": -0.0202,
+      "p90": 0.446,
+      "repeats": 5,
+      "comparators": {
+        "flash_submit_s": 2.0504,
+        "bare_torchrun_s": 1.9428
+      },
+      "notes": [
+        "overhead = flash.submit wall-clock minus identical bare torchrun, paired per repeat",
+        "both launches share the same FLASHML_CKPT_DIR/OUTPUT_DIR isolation (a fresh temp)"
+      ]
+    },
+    {
+      "scenario": "loop_overhead",
+      "unit": "ms/checkpoint",
+      "median": 6.073,
+      "p10": -0.15,
+      "p90": 7.198,
+      "repeats": 5,
+      "comparators": {
+        "ft_steps_per_s": 187.3,
+        "vanilla_steps_per_s": 101.3,
+        "ft_vs_vanilla_wall_per_step_ratio": 0.541
+      },
+      "notes": [
+        "per-checkpoint = (ckpt=50 run - checkpoint-disabled run) / 4; startup+loop cancel in the delta",
+        "a per-checkpoint figure at or below zero means the write cost is BELOW the run-to-run noise floor for this tiny model (a few-KB state dict) \u2014 checkpoints are effectively free here; a larger model would surface a positive cost",
+        "steps/sec and the ratio are startup-dominated at this step count and compare DIFFERENT scripts (ft MLP vs vanilla Linear) \u2014 indicative, not identical-work",
+        "checkpoint-every=0 raises ZeroDivisionError in the example; a sentinel > steps disables instead"
+      ]
+    },
+    {
+      "scenario": "recovery_economics",
+      "unit": "seconds saved",
+      "median": 0.012,
+      "p10": -0.19,
+      "p90": 0.244,
+      "repeats": 5,
+      "comparators": {
+        "auto_resume_s": 4.091,
+        "raw_rerun_from_zero_s": 4.021,
+        "steps_not_recomputed": 40.0
+      },
+      "notes": [
+        "raw-torchrun cost modelled as t_crash + t_full (no checkpoint \u21d2 rerun the whole job)",
+        "auto-resume verified to restart from the step-40 checkpoint (trials[0].resumed_from == 40)",
+        "seconds-saved is small here because torchrun startup (~2 s) dominates and the 40 recomputed steps of this tiny model cost only a fraction of a second; the saving scales with the compute between the last checkpoint and the crash \u2014 negligible at smoke size, hours on a real job",
+        "steps_not_recomputed (40) is the size-INDEPENDENT guarantee: resume never re-does work past the last valid checkpoint, whatever a step costs"
+      ]
+    }
+  ]
+}

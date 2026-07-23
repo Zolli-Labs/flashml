@@ -56,7 +56,8 @@ flashruntime = ["py.typed", "viewer/_docs/**"]
 # Unit tests run everywhere with zero infrastructure. Integration tests
 # (tests/integration/) need Docker / a Kubernetes cluster / MinIO and are
 # opt-in: pytest -m integration
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration and not bench_smoke'"
 markers = [
     "integration: needs external infrastructure (docker, kubernetes, minio); excluded by default",
+    "bench_smoke: benchmark scenario smoke tests (spawn subprocesses/torchrun; assert a scenario RUNS at 1 repeat, never a measured number); excluded by default, run with -m bench_smoke",
 ]

@@ -11,6 +11,10 @@ build/
 # examples write metrics.json into their own dir (cwd) when run; it is a
 # generated artifact the SDK copies out — never commit the stray original.
 examples/*/metrics.json
+# Benchmark results are timestamped scratch (python -m benchmarks run …); only
+# the committed baseline-<host>.json is tracked — the docs render it at build time.
+/benchmarks/results/*.json
+!/benchmarks/results/baseline-*.json
 # Built docs (scripts/build_docs.py) — generated from docs/site/, never committed.
 # The viewer serves the first at /docs; the second deploys to GitHub Pages.
 # Leading slash anchors /site to the repo root — do NOT ignore docs/site/ (source).

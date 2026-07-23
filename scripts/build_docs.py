@@ -52,6 +52,11 @@ SRC = REPO_ROOT / "docs" / "site"
 VIEWER_OUT = REPO_ROOT / "flashruntime" / "viewer" / "_docs"  # served at /docs
 PAGES_OUT = REPO_ROOT / "site"  # GitHub Pages
 
+# The benchmarks page renders its tables from the MEASURED baseline JSON at
+# build time (Task 10): a page can never show a figure the suite didn't produce.
+BENCH_RESULTS = REPO_ROOT / "benchmarks" / "results"
+BENCH_MARKER = "<!-- BENCH_TABLES -->"
+
 MD_EXTENSIONS = ["fenced_code", "tables", "toc"]  # toc → heading ids for anchors
 # `href="foo.md"` / `href="foo.md#sec"` for a same-repo page → rewrite to .html.
 _INTERNAL_MD = re.compile(r'(href=")([^"]+?)\.md(#[^"]*)?(")')
@@ -73,6 +78,30 @@ def load_nav(src: Path) -> dict[str, list[str]]:
     return {str(section): [str(f) for f in (files or [])] for section, files in data.items()}
 
 
+def _bench_tables_md() -> str:
+    """Render the committed baseline JSON into Markdown tables (host block,
+    summary, per-scenario detail + repro command). Falls back to a build-time
+    hint if no baseline is committed, so the docs still build on a fresh clone."""
+    baselines = sorted(BENCH_RESULTS.glob("baseline-*.json"))
+    if not baselines:
+        return "_No baseline committed yet — run `python -m benchmarks run --all --repeats 5`._"
+    # `benchmarks` is a repo-root dev/eval package (not shipped in the wheel), so
+    # ensure the repo root is importable when this runs as a bare script.
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from benchmarks import report  # dev-time only; pulls no heavy deps at import
+
+    return report.render_document(json.loads(baselines[0].read_text(encoding="utf-8")))
+
+
+def _inject_bench(text: str) -> str:
+    """Substitute the measured benchmark tables for the page's marker. A no-op
+    for every page that does not carry the marker."""
+    if BENCH_MARKER in text:
+        return text.replace(BENCH_MARKER, _bench_tables_md())
+    return text
+
+
 def _page_title(text: str, fallback: str) -> str:
     """First `# ` heading is the page title (fallback: the filename)."""
     for line in text.splitlines():
@@ -92,7 +121,7 @@ def _load_pages(src: Path, nav: dict[str, list[str]]):
             if not path.is_file():
                 missing.append(f"{section} -> {file}")
                 continue
-            text = path.read_text(encoding="utf-8")
+            text = _inject_bench(path.read_text(encoding="utf-8"))
             pages.append((file, _page_title(text, file), text))
     return pages, missing
 
