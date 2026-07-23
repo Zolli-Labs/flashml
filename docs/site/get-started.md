@@ -76,10 +76,14 @@ print(run.state.value, run.trials)
 ```
 
 `ddp(script, *, source=".", nproc_per_node=2, nnodes=1, script_args="",
-env=None)` emits `torchrun --nproc-per-node=N --nnodes=1 --standalone <script>
-<args>`. `nproc_per_node=2` starts two worker processes that rendezvous on
-loopback and hand each rank its `RANK` / `WORLD_SIZE` / `LOCAL_RANK` — a real
-distributed run on a single machine, no GPU required.
+env=None)` emits `torchrun --nproc-per-node=N --nnodes=1 --standalone
+--local-addr=127.0.0.1 <script> <args>`. The `--local-addr=127.0.0.1` pins the
+advertised rendezvous address to loopback (otherwise torchrun advertises
+`socket.getfqdn()`, which on some macOS DNS setups is unresolvable and the run
+hangs before spawning a process). `nproc_per_node=2` starts two worker
+processes that rendezvous on loopback and hand each rank its `RANK` /
+`WORLD_SIZE` / `LOCAL_RANK` — a real distributed run on a single machine, no
+GPU required.
 
 `nnodes > 1` raises `NotImplementedError` today: multi-node rendezvous is a
 launcher concern for a later slice. `--standalone` is single-node by

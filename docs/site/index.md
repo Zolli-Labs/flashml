@@ -14,7 +14,7 @@ collects your artifacts.
 The contract at the boundary is deliberately thin: **arguments in,
 `metrics.json` out.** A script that already reads its hyperparameters from
 `argparse` and writes a small JSON file of results needs *zero* FlashRuntime
-imports to be operated. This is [ADR-0003](https://github.com/Zolli-Labs/flashruntime)'s
+imports to be operated. This is [ADR-0003](https://github.com/Zolli-Labs/flashruntime/blob/main/docs/adr/0003-reliability-runtime-first-planner-second.md)'s
 fourth axis in practice: recipes integrate user code; the distributed math is
 always done by your framework (PyTorch DDP, `torchrun`, Hugging Face, sklearn).
 

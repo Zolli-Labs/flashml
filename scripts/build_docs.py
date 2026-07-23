@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import html as _html
 import json
+import posixpath
 import re
 import shutil
 import sys
@@ -100,7 +101,29 @@ def _load_pages(src: Path, nav: dict[str, list[str]]):
 # Markdown → HTML body: render, rewrite internal .md links, add copy buttons.
 # --------------------------------------------------------------------------
 def _html_name(file: str) -> str:
+    # The page's ROOT-RELATIVE site path (e.g. "tutorials/deep.html"). Always
+    # POSIX-style ("/"): these are URLs and on-disk keys, never OS paths.
     return file[:-3] + ".html" if file.endswith(".md") else file + ".html"
+
+
+def _relative_href(target: str, from_page: str) -> str:
+    """Href to built page `target` (a root-relative site path) as seen from
+    `from_page` (also a root-relative site path). We resolve relative to the
+    CURRENT page's directory so a page in a subdir links correctly — a page at
+    `tutorials/deep.html` must reach root's `index.html` as `../index.html`,
+    not `index.html`. `posixpath` (not `os.path`) because these are URLs: the
+    separator must be "/" on every OS, never a backslash on Windows."""
+    return posixpath.relpath(target, posixpath.dirname(from_page) or ".")
+
+
+def _root_prefix(from_page: str) -> str:
+    """The relative path from `from_page`'s directory back to the site root,
+    with a trailing "/" ("" for a root page, "../" one level deep). The page
+    template substitutes it into the few links that point at root assets — the
+    brand link, the search-index fetch, and (in JS) the search-result hrefs —
+    so those resolve from a subdir page too."""
+    depth = _html_name(from_page).count("/")
+    return "../" * depth
 
 
 def _render_body(text: str) -> str:
@@ -136,21 +159,26 @@ def _plain_text(body_html: str) -> str:
 # Page template — built from the viewer's TOKENS so the two surfaces match.
 # --------------------------------------------------------------------------
 def _sidebar(nav: dict[str, list[str]], titles: dict[str, str], current: str) -> str:
+    # Every nav href is computed RELATIVE to `current`'s directory, so the same
+    # sidebar links resolve whether the page sits at root or in a subdir.
+    here = _html_name(current)
     parts = []
     for section, files in nav.items():
         parts.append(f'<div class="nav-section">{_html.escape(section)}</div>')
         for file in files:
             cls = "nav-link active" if file == current else "nav-link"
             label = _html.escape(titles.get(file, file))
-            parts.append(f'<a class="{cls}" href="{_html_name(file)}">{label}</a>')
+            href = _relative_href(_html_name(file), here)
+            parts.append(f'<a class="{cls}" href="{href}">{label}</a>')
     return "\n".join(parts)
 
 
-def render_page(title: str, nav_html: str, body_html: str) -> str:
+def render_page(title: str, nav_html: str, body_html: str, root: str) -> str:
     doc = _TEMPLATE
     for name, value in TOKENS.items():  # %%bg%%, %%font%%, … (no key is a prefix of another)
         doc = doc.replace(f"%%{name}%%", value)
     doc = doc.replace("%%title%%", _html.escape(title))
+    doc = doc.replace("%%root%%", root)  # path back to site root (root assets)
     doc = doc.replace("%%nav%%", nav_html)
     return doc.replace("%%content%%", body_html)
 
@@ -166,7 +194,12 @@ def _emit(nav: dict[str, list[str]], pages: list, out: Path) -> None:
     index = []
     for file, title, text in pages:
         body = _render_body(text)
-        (out / _html_name(file)).write_text(render_page(title, _sidebar(nav, titles, file), body), encoding="utf-8")
+        dest = out / _html_name(file)
+        dest.parent.mkdir(parents=True, exist_ok=True)  # nested nav entry → subdir
+        page = render_page(title, _sidebar(nav, titles, file), body, _root_prefix(file))
+        dest.write_text(page, encoding="utf-8")
+        # URLs in the index are ROOT-RELATIVE site paths; the page JS resolves
+        # them against its own ROOT (see the template). One shared index for all.
         index.append({"url": _html_name(file), "title": title, "text": _plain_text(body)})
     (out / "search-index.json").write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
 
@@ -205,13 +238,19 @@ def check(src: Path) -> list[str]:
     built = {_html_name(file) for file, _, _ in pages}
     titles = {file: title for file, title, _ in pages}
     for file, _, text in pages:
+        page = _html_name(file)  # root-relative site path of the current page
+        page_dir = posixpath.dirname(page)
         links = _HREF.findall(_render_body(text)) + _HREF.findall(_sidebar(nav, titles, file))
         for href in links:
             target = href.split("#", 1)[0]
             if not target or "://" in target or target.startswith(("mailto:", "/", "data:")):
                 continue
-            if target not in built:
-                problems.append(f"{_html_name(file)} -> {href} (no such built page)")
+            # hrefs are page-RELATIVE (sidebar + authored cross-links) — resolve
+            # each back to a root-relative site path before checking it exists,
+            # with the SAME rules the browser uses (../ climbs out of the subdir).
+            resolved = posixpath.normpath(posixpath.join(page_dir, target))
+            if resolved not in built:
+                problems.append(f"{page} -> {href} (no such built page)")
     return problems
 
 
@@ -318,7 +357,7 @@ _TEMPLATE = r"""<!doctype html>
 <body>
 <div class="layout">
   <aside class="sidebar">
-    <a class="brand" href="index.html">flashruntime<small>documentation</small></a>
+    <a class="brand" href="%%root%%index.html">flashruntime<small>documentation</small></a>
     <div class="search">
       <input id="q" type="search" placeholder="Search docs  (press /)" autocomplete="off" spellcheck="false">
       <div id="results"></div>
@@ -332,11 +371,15 @@ _TEMPLATE = r"""<!doctype html>
 // ---- client-side search: fetch the builder's index, filter as you type -----
 // (<=60 lines, vanilla JS, no external anything — the index is a sibling file.)
 let INDEX = [];
+// Path from THIS page back to the site root. The index stores root-relative
+// URLs (e.g. "tutorials/deep.html"); we fetch it and build result links
+// against ROOT so a page in a subdir resolves them too (see build_docs.py).
+const ROOT = "%%root%%";
 const q = document.getElementById("q");
 const results = document.getElementById("results");
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-fetch("search-index.json").then((r) => r.json()).then((d) => { INDEX = d; }).catch(() => {});
+fetch(ROOT + "search-index.json").then((r) => r.json()).then((d) => { INDEX = d; }).catch(() => {});
 
 // A short context window around the first match, so a hit shows WHY it matched.
 function snippet(text, needle) {
@@ -356,7 +399,7 @@ function runSearch() {
   }).filter(Boolean).slice(0, 20);
   results.className = "open";
   results.innerHTML = hits.length
-    ? hits.map((h) => '<a href="' + h.url + '"><b>' + esc(h.title) + "</b>" +
+    ? hits.map((h) => '<a href="' + ROOT + h.url + '"><b>' + esc(h.title) + "</b>" +
         (h.snip ? "<span>" + esc(h.snip) + "</span>" : "") + "</a>").join("")
     : '<div class="nohit">no matches</div>';
 }
