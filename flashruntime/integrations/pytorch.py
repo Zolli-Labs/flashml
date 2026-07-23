@@ -30,6 +30,12 @@ def ddp(
         f"--nproc-per-node={nproc_per_node}",
         f"--nnodes={nnodes}",
         "--standalone",
+        # Single-node by definition (nnodes > 1 raised above), so pin the
+        # advertised rendezvous address. Without this torchrun advertises
+        # socket.getfqdn(), which on some macOS DNS setups returns an
+        # unresolvable ip6.arpa name — workers then retry DNS forever and
+        # the run hangs before spawning a single process.
+        "--local-addr=127.0.0.1",
         script,
         *shlex.split(script_args),
     ]

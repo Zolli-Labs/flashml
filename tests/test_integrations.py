@@ -35,8 +35,17 @@ def test_pytorch_ddp_builds_torchrun_command():
     from flashruntime.integrations import pytorch as fr_torch
 
     wl = fr_torch.ddp("train.py", source="/proj", nproc_per_node=4, script_args="--steps 100")
-    assert wl.command[:4] == ["torchrun", "--nproc-per-node=4", "--nnodes=1", "--standalone"]
-    assert wl.command[4:] == ["train.py", "--steps", "100"]
+    assert wl.command[:5] == [
+        "torchrun",
+        "--nproc-per-node=4",
+        "--nnodes=1",
+        "--standalone",
+        # Single-node by definition, so pin the rendezvous address: torchrun
+        # otherwise advertises socket.getfqdn(), which macOS can resolve to an
+        # unresolvable ip6.arpa name — workers then retry DNS forever.
+        "--local-addr=127.0.0.1",
+    ]
+    assert wl.command[5:] == ["train.py", "--steps", "100"]
     assert wl.resolved_mode() == "coordinated"
     assert wl.checkpoint is not None
 
