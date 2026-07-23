@@ -20,6 +20,7 @@ import urllib.request
 from flashruntime.checkpoint.local import write_manifest
 from flashruntime.viewer import collect
 from flashruntime.viewer.server import RunViewerServer
+from flashruntime.viewer.state import _TAIL_WINDOW, _log_tail, _metrics_tail
 
 
 def _fake_run(tmp_path, *, contract="viewer_v1", metrics_lines=3, with_ckpt=True):
@@ -133,6 +134,72 @@ def test_collect_survives_missing_attempt_dir(tmp_path):
     snap = collect(run_dir)
     assert snap["attempts"][0]["metrics"] == []
     assert snap["attempts"][0]["log_tail"] == ""
+
+
+# --------------------------------------------------------------------------
+# bounded tail helpers (_metrics_tail / _log_tail)
+#
+# The viewer polls every 2 s against a LIVE run dir; a chatty trainer's
+# metrics.jsonl / launcher.log can grow to multiple GB. The tail must cost one
+# bounded window read, never a whole-file slurp — memory + disk thrash against
+# the writer is exactly the interference this module promises not to cause.
+# --------------------------------------------------------------------------
+
+
+def test_metrics_tail_bounded_on_huge_multimb_file(tmp_path):
+    """A multi-MB metrics.jsonl yields the correct last-500 tail, and that
+    tail provably fits inside the seek window (so it never depends on a
+    whole-file read)."""
+    (tmp_path / "metrics.jsonl").write_text(
+        "".join(json.dumps({"step": i, "loss": 1.0 / (i + 1)}) + "\n" for i in range(200_000))
+    )
+    size = (tmp_path / "metrics.jsonl").stat().st_size
+    assert size > 4 * _TAIL_WINDOW  # the file really is far bigger than the window
+    result = _metrics_tail(tmp_path)
+    assert len(result) == 500  # last 500, not all 200k
+    assert result[-1]["step"] == 199_999
+    assert result[0]["step"] == 199_500
+    # structural check: the wanted 500-record tail sits comfortably inside one
+    # window, so a bounded read is sufficient to produce the correct answer.
+    tail_bytes = "".join(
+        json.dumps({"step": i, "loss": 1.0 / (i + 1)}) + "\n" for i in range(199_500, 200_000)
+    ).encode()
+    assert len(tail_bytes) < _TAIL_WINDOW
+
+
+def test_log_tail_bounded_on_huge_multimb_file(tmp_path):
+    """A multi-MB launcher.log yields the correct last-100 lines from a
+    bounded window read."""
+    (tmp_path / "launcher.log").write_text("".join(f"line {i}\n" for i in range(200_000)))
+    assert (tmp_path / "launcher.log").stat().st_size > _TAIL_WINDOW
+    lines = _log_tail(tmp_path).split("\n")
+    assert len(lines) == 100  # last 100, not all 200k
+    assert lines[-1] == "line 199999"
+    assert lines[0] == "line 199900"
+
+
+def test_metrics_tail_window_boundary_mid_line_drops_partial(tmp_path):
+    """When the window's start byte lands inside a record (here a giant head
+    record wider than the whole window), that torn leading fragment is dropped
+    — no decode error leaks and only the clean trailing records parse."""
+    giant = json.dumps({"step": -1, "pad": "x" * _TAIL_WINDOW})  # wider than the window
+    small = [json.dumps({"step": i, "loss": 1.0 / (i + 1)}) for i in range(10)]
+    (tmp_path / "metrics.jsonl").write_text(giant + "\n" + "\n".join(small) + "\n")
+    result = _metrics_tail(tmp_path)
+    assert [r["step"] for r in result] == list(range(10))  # torn head record excluded
+    assert all("pad" not in r for r in result)  # the giant record never leaks through
+
+
+def test_log_tail_window_boundary_drops_torn_first_line(tmp_path):
+    """A head line longer than the window forces the window to start mid-line;
+    that torn fragment must not surface as a log line while the clean trailing
+    lines are all present."""
+    head = "H" * (_TAIL_WINDOW + 1000)  # single line wider than the window
+    clean = [f"line {i}" for i in range(50)]
+    (tmp_path / "launcher.log").write_text(head + "\n" + "\n".join(clean) + "\n")
+    result = _log_tail(tmp_path)
+    assert result.split("\n") == clean  # exactly the clean tail, torn head dropped
+    assert "H" not in result  # no fragment of the giant head line leaked
 
 
 # --------------------------------------------------------------------------

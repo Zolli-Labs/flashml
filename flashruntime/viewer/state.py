@@ -20,12 +20,22 @@ is the sibling `ckpt/` dir of an attempt dir).
 
 from __future__ import annotations
 
+import io
 import json
 import time
 from pathlib import Path
 
 _METRICS_TAIL = 500  # last N points per attempt — enough for a loss curve, bounded memory
 _LOG_TAIL = 100  # last N lines of launcher.log — a glance at what the process last said
+
+# The tail window we seek-and-read from the END of a growing log. WHY BOUNDED:
+# the viewer re-reads these files every ~2 s against a LIVE run; a chatty
+# trainer's launcher.log / metrics.jsonl can reach multiple GB, and slurping
+# the whole file each poll would blow memory and thrash the disk against the
+# writer — the very interference this module promises not to cause. 256 KiB
+# comfortably holds the last 500 metrics records (~0.5 KiB each) or 100 log
+# lines of any sane width, so the wanted tail always lands inside one window.
+_TAIL_WINDOW = 256 * 1024
 
 
 def collect(run_dir: Path) -> dict:
@@ -88,16 +98,39 @@ def _collect(run_dir: Path) -> dict:
     return doc
 
 
+def _tail_window_lines(path: Path) -> list[str]:
+    """Return the whole lines contained in the last `_TAIL_WINDOW` bytes of
+    `path` — a bounded seek+read that NEVER loads the whole file (see the
+    `_TAIL_WINDOW` note). Total: any OSError (missing / dir gone / unreadable)
+    degrades to `[]`, never an exception."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, io.SEEK_END)
+            size = fh.tell()
+            # Read a window ending at EOF rather than from byte 0: on a
+            # multi-GB log this is one bounded read, not a full slurp. When the
+            # file is smaller than the window, start clamps to 0 (whole file).
+            start = max(0, size - _TAIL_WINDOW)
+            fh.seek(start)
+            window = fh.read()
+    except OSError:
+        return []
+    lines = window.decode("utf-8", errors="replace").splitlines()
+    # If we began mid-file (start > 0), the first "line" is a torn fragment of
+    # the record straddling the window's start byte — drop it so only whole
+    # lines escape (a partial JSON metrics line would skip on parse anyway).
+    if start > 0 and lines:
+        lines = lines[1:]
+    return lines
+
+
 def _metrics_tail(attempt_dir: Path, limit: int = _METRICS_TAIL) -> list[dict]:
     """Last `limit` JSON records from `metrics.jsonl`, keys passed through
     as-is. A half-written final line (the writer appended between our read and
-    its newline) fails to parse and is skipped — the earlier points survive."""
-    try:
-        lines = (attempt_dir / "metrics.jsonl").read_text(errors="replace").splitlines()
-    except OSError:
-        return []  # no metrics yet / dir gone: empty section, not a crash
+    its newline) fails to parse and is skipped — the earlier points survive.
+    Reads only the bounded tail window, never the whole file."""
     records: list[dict] = []
-    for line in lines:
+    for line in _tail_window_lines(attempt_dir / "metrics.jsonl"):
         line = line.strip()
         if not line:
             continue
@@ -111,12 +144,9 @@ def _metrics_tail(attempt_dir: Path, limit: int = _METRICS_TAIL) -> list[dict]:
 
 
 def _log_tail(attempt_dir: Path, tail_lines: int = _LOG_TAIL) -> str:
-    """Last `tail_lines` lines of `launcher.log`, or "" if unreadable."""
-    try:
-        lines = (attempt_dir / "launcher.log").read_text(errors="replace").splitlines()
-    except OSError:
-        return ""
-    return "\n".join(lines[-tail_lines:])
+    """Last `tail_lines` lines of `launcher.log`, or "" if unreadable. Reads
+    only the bounded tail window, never the whole file."""
+    return "\n".join(_tail_window_lines(attempt_dir / "launcher.log")[-tail_lines:])
 
 
 def _manifests_for_root(ckpt_root: Path) -> list[dict]:
