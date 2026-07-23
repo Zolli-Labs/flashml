@@ -9,35 +9,51 @@ names the reason the pattern implies its class, and the *first* matching rule
 wins (order encodes priority — deterministic-bug evidence outranks the
 transient default).
 
-The four categories it maps, and why each is the honest reading:
+Rule table (checked top-to-bottom, first match wins). One rule, one reason:
 
-- exit 0 / never started → neutral signals. Nothing broke, so classify()
-  returns UNKNOWN; the retry loop only consults this on a FAILED launch, so
-  this is a guard that keeps the function total, not a live path.
+  1. exit 0 / never started        → neutral signals (nothing broke; a guard
+                                      that keeps the function total).
+  2. a named deterministic
+     exception on a traceback
+     TERMINAL line                 → APPLICATION-ERROR (`exit_deterministic`):
+                                      import/parse/name errors recur
+                                      byte-for-byte, so fail fast, don't pay
+                                      for a re-run to the same certainty.
+  3. a bare "Traceback" that is
+     NOT the torchrun wrapper       → APPLICATION-ERROR: an unhandled exception
+                                      is a code error by default.
+  4. everything else (signal death
+     / OOM / bare SystemExit /
+     torchrun ChildFailedError)    → WORKER-CRASH (the transient default):
+                                      bad luck, worth one fresh attempt.
 
-- a deterministic Python bug — a SyntaxError / ImportError / ModuleNotFoundError
-  / NameError / AttributeError named in the log, or (barring the torchrun
-  wrapper below) any unhandled exception whose "Traceback (most recent call
-  last):" reached the log → APPLICATION-ERROR signal (`exit_deterministic`).
-  The same import/parse/name failure recurs byte-for-byte on a retry, so the
-  policy fails fast (FAIL_JOB) instead of spending a second attempt to reach
-  the same certainty. Burning capacity on a bug is the most expensive
-  "recovery" (policy.py).
+Why rule 2 is anchored to a traceback TERMINAL line, not a bare substring:
+CPython prints the failing exception type at the START of the traceback's
+final line — `ModuleNotFoundError: ...`, or dotted with its defining module,
+`pkg.mod.SomeError: ...` — whereas prose only ever *mentions* an exception
+name mid-line. The canonical false positive is the startup warning
+`ImportError: flash_attn not available, falling back to eager attention`,
+which real loggers emit behind a timestamp/level prefix
+(`2026-… WARNING ImportError: …`) so the name never begins the line. A plain
+`substring in log` scan read that prose as a deterministic bug and failed the
+job fast — and because fail-fast is terminal, that was the worst-direction
+false positive: a transient crash that would have resumed instead never
+retried. Line-anchoring keeps every genuine traceback terminal (rule 2 still
+fires on the real thing) while ignoring the name wherever it appears in prose.
 
-- a signal death / OOM / bare `SystemExit` / any other unexplained nonzero
-  exit → WORKER-CRASH signal (the transient default). The OS or an allocator
-  killed the process, or the code exited nonzero without an unhandled
-  exception — treated as bad luck, worth one fresh attempt. A genuine bug
-  that slips through here re-crashes deterministically (printing a traceback)
-  and is caught by the rule above on the next go-round.
-
-One empirically necessary carve-out: torchrun / torch.distributed.elastic
-wraps *every* worker death — transient crashes included — in a
-`ChildFailedError` and prints ITS OWN traceback; the child's real traceback is
-not in this log (the summary shows "error_file: <N/A>"). So a bare "Traceback"
-line accompanied by that wrapper is the launcher's stack, carrying no evidence
-about whether the user's failure was deterministic — it must NOT be read as an
-application error, or a resumable crash would fail fast and never retry.
+Interaction of rules 2, 3 and the torchrun carve-out (precedence, explicit):
+torchrun / torch.distributed.elastic wraps *every* worker death — transient
+crashes included — in a `ChildFailedError` and prints ITS OWN traceback; by
+default the child's real traceback is not in this log (`error_file: <N/A>`).
+That wrapper terminal line is `…errors.ChildFailedError:` — `ChildFailedError`
+is not in the deterministic marker set, so rule 2 never fires on the wrapper.
+The wrapper's bare "Traceback" line WOULD trip rule 3, so rule 3 is
+disqualified whenever `ChildFailedError` is present, letting the death fall
+through to the transient default (rule 4) — which is exactly what the
+kill-and-resume e2e depends on. Rule 2 is intentionally NOT gated by the
+wrapper: a genuine child terminal line (e.g. a real `ModuleNotFoundError:` if
+elastic error-files are enabled) is a true deterministic bug and should fail
+fast even under torchrun.
 
 Deliberately narrow: it never fabricates node / accelerator / communication /
 storage signals a single local process cannot actually evidence — those
@@ -46,11 +62,12 @@ classes belong to the distributed coordinator, not the local launcher.
 
 from __future__ import annotations
 
+import re
+
 from flashruntime.recovery.taxonomy import FailureSignals
 
 # Exception-type names that mark a DETERMINISTIC bug: the same failure recurs
-# byte-for-byte on retry, so retrying only re-reaches it. Substring matches on
-# the class name as printed in a Python traceback.
+# byte-for-byte on retry, so retrying only re-reaches it.
 _DETERMINISTIC_EXC_MARKERS = (
     "SyntaxError",          # the file will not parse — a retry parses the same file
     "IndentationError",     # a parse error too — same input, same failure
@@ -58,6 +75,19 @@ _DETERMINISTIC_EXC_MARKERS = (
     "ModuleNotFoundError",  # ImportError's subclass; its name lacks the substring "ImportError"
     "NameError",            # an undefined name is a code bug, not bad luck
     "AttributeError",       # a code / version-contract bug, deterministic by nature
+)
+
+# A marker only counts when it stands where CPython prints the failing type: at
+# the START of the traceback's final line, either bare (`NameError`) or with a
+# message (`NameError: ...`), optionally dotted with the defining module
+# (`pkg.mod.NameError: ...`). Line-anchoring (see module docstring) is the fix
+# for the incidental-substring false positive — exception names in prose don't
+# start lines; traceback terminals always do. re.MULTILINE makes ^/$ match at
+# every line boundary; the trailing `(?::|$)` boundary stops a marker from
+# matching a longer name it merely prefixes (e.g. `NameErrorX:`).
+_DETERMINISTIC_TERMINAL_RE = re.compile(
+    r"^(?:\w+\.)*(?:" + "|".join(_DETERMINISTIC_EXC_MARKERS) + r")(?::|$)",
+    re.MULTILINE,
 )
 
 # torchrun / elastic re-raises ChildFailedError (with its own traceback) for
@@ -77,26 +107,29 @@ def from_local_launch(exit_code: int | None, log_tail: str) -> FailureSignals:
     """
     log = log_tail or ""
 
-    # A clean exit is not a failure — nothing to recover. Guard only: the retry
-    # loop never asks on SUCCEEDED, but this keeps from_local_launch total.
+    # Rule 1 — a clean exit is not a failure; nothing to recover. Guard only:
+    # the retry loop never asks on SUCCEEDED, but this keeps the function total.
     if exit_code == 0 or exit_code is None:
         return FailureSignals(exit_code=exit_code)
 
-    # A named deterministic bug (import / parse / name error) — the same error
-    # reappears on a byte-identical retry, so mark it deterministic and let the
-    # policy fail fast rather than pay for a re-run to the same failure.
-    if any(marker in log for marker in _DETERMINISTIC_EXC_MARKERS):
+    # Rule 2 — a named deterministic bug (import / parse / name error) standing
+    # on a traceback TERMINAL line: the same error reappears on a byte-identical
+    # retry, so mark it deterministic and let the policy fail fast. Anchored to
+    # the line start (not a bare substring) so an exception name mentioned in a
+    # prose log line — e.g. `… WARNING ImportError: flash_attn not available` —
+    # is not mistaken for the failure that actually killed the process.
+    if _DETERMINISTIC_TERMINAL_RE.search(log):
         return FailureSignals(exit_code=exit_code, exit_deterministic=True)
 
-    # An unhandled exception that printed its own traceback — deterministic by
-    # default (unhandled exceptions are code errors). Excluded when it is the
-    # torchrun elastic wrapper, whose traceback is the launcher's stack and
-    # says nothing about whether the user's failure was deterministic.
+    # Rule 3 — an unhandled exception that printed its own traceback:
+    # deterministic by default (unhandled exceptions are code errors). Excluded
+    # when it is the torchrun elastic wrapper, whose traceback is the launcher's
+    # stack and says nothing about whether the user's failure was deterministic.
     if _TRACEBACK_MARKER in log and _ELASTIC_WRAPPER_MARKER not in log:
         return FailureSignals(exit_code=exit_code, exit_deterministic=True)
 
-    # Everything else: a signal death / OOM (SIGKILL/SIGSEGV, exit 137, a
-    # negative POSIX returncode), a bare SystemExit with no traceback, or a
+    # Rule 4 — everything else: a signal death / OOM (SIGKILL/SIGSEGV, exit 137,
+    # a negative POSIX returncode), a bare SystemExit with no traceback, or a
     # torchrun ChildFailedError — all transient. Leave exit_deterministic False
     # so classify() returns WORKER_CRASH and the policy grants a fresh attempt.
     return FailureSignals(exit_code=exit_code)
