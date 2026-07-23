@@ -45,6 +45,16 @@ def test_checkpoint_every_gating(ft, tmp_path):
     assert (tmp_path / "ckpt" / "step-000010" / "manifest.json").is_file()
 
 
+def test_checkpoint_every_zero_is_a_noop_not_a_crash(ft, tmp_path):
+    # every<=0 means "no periodic checkpointing" — a fault-tolerance helper
+    # must never itself crash training over a config value (used to raise
+    # ZeroDivisionError; found by the benchmark suite)
+    model = _model()
+    ft.checkpoint(model, step=10, every=0)
+    ft.checkpoint(model, step=10, every=-3)
+    assert not list((tmp_path / "ckpt").glob("step-*"))
+
+
 def test_checkpoint_then_resume_restores_weights_and_step(ft):
     model = _model()
     opt = torch.optim.SGD(model.parameters(), lr=0.1)

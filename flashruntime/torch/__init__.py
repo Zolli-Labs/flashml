@@ -148,8 +148,14 @@ def prepare(model, optimizer=None, dataloader=None):
 def checkpoint(model, optimizer=None, *, step: int, every: int | None = None) -> None:
     """Write a resumable checkpoint under the manifest contract (parts
     first, manifest last). rank 0 writes; every rank synchronizes on the
-    barrier so no one races past a half-written checkpoint."""
-    if every is not None and (step == 0 or step % every != 0):
+    barrier so no one races past a half-written checkpoint.
+
+    `every=None` (default) checkpoints unconditionally; `every=N` gates to
+    every Nth step; `every<=0` means "no periodic checkpointing" and is a
+    no-op — a helper whose contract is fault tolerance must never itself
+    crash training over a config value (found by the benchmark suite:
+    `every=0` used to raise ZeroDivisionError)."""
+    if every is not None and (every <= 0 or step == 0 or step % every != 0):
         return
     import torch
 
