@@ -57,7 +57,9 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
 - `flashml_workloads/sharded_kmeans.py` = the POC's Ray workload (deterministic
   shards, retriable tasks, honest recovery evidence).
 - `deploy/docker/` = kmeans + service images. `docs/adr/` = ACK Edge + PAI-DLC ADRs.
-- `scheduler/` remains the only scaffold package.
+- `scheduler/` = `PlacementPolicy` ABC + `FifoPlacement` + `IsolationAwarePlacement`
+  (fail-closed sandbox placement for service-side command tasks). No scaffold
+  packages remain; the numpy prototype engine has been removed.
 - `planner/` + `protocol/plan_v1alpha1.py` = the strategy planner (July
   2026): `flash.plan(PlanRequest)` → explained `PlanReport`/`StrategyPlan`;
   CLI `flashruntime plan spec.yaml`. Deterministic, framework-import-free,
@@ -98,54 +100,102 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   framework adapters in `integrations/` (sklearn sweeps, pytorch DDP, HF
   Trainer callback — no framework imports at module level) + the optional
   in-script `flashruntime.torch` helper (3 verbs + read-only accessors incl.
-  device/backend — capability guardrail, not a count: prepare/checkpoint/
-  log_metrics/rank/world_size/is_main/start_step; wraps torch's own DDP and
-  stops — ADR-0003 guardrail). Service-side command jobs expand + lease
-  with fail-closed sandbox placement (`scheduler.IsolationAwarePlacement`);
+  `device()`/`backend()` — capability guardrail, not a count: prepare/
+  checkpoint/log_metrics/rank/world_size/is_main/start_step; wraps torch's
+  own DDP and stops — ADR-0003 guardrail). Service-side command jobs expand
+  + lease with fail-closed sandbox placement (`scheduler.IsolationAwarePlacement`);
   **executing** the `argv` payload waits on flashnode's argv runner tier
   (cross-repo). User-facing guide: `docs/guides/bring-your-code.md`.
-- Tests: `pytest` (integration suite opt-in via `-m integration`, lives in
+- **Automatic recovery in the SDK** (July 2026): `flash.submit(...,
+  max_restarts=N)` turns a FAILED attempt into `FailureSignals`, calls
+  `recovery.classify()`/`decide()`, and — unless the failure is a
+  deterministic app error (FAIL_JOB, fast-stop) — relaunches from the
+  job-scoped checkpoint. Decisions surface as `FAILURE_CLASSIFIED` /
+  `RECOVERY_ACTION_SELECTED` events on the run (`sdk.py`). This is the
+  SDK-local path; the *service coordinator* still recovers via implicit
+  lease-expiry (classify/decide uncalled there).
+- **Live run viewer** (`viewer/`, July 2026): a stdlib, zero-CDN HTML page
+  served on loopback during a watched run (topology / loss / verified
+  checkpoints / recovery feed), reading only the versioned `run.json`
+  (`viewer_v1`) contract. `flash.submit(watch=…)` opens it (auto: on at a
+  TTY, off in pipes/CI); the built docs site is served from it at `/docs`.
+- **Docs site + benchmarks** (July 2026): PyTorch-style site under
+  `docs/site/`, built by `scripts/build_docs.py` (every byte inline;
+  `--check` link-verifies), deployed to GitHub Pages on release. Honest
+  benchmark suite (`python -m benchmarks run`): each result records its
+  host, missing comparators are skipped rows not fakes; measured Apple-M4
+  baseline committed under `benchmarks/results/`.
+- **Real-GPU validation (2026-07-23):** the CUDA paths (nccl DDP, per-rank
+  device placement, GPU kill-and-resume) validated on **2×RTX 4090**
+  (RunPod community cloud, torch 2.7.1+cu128, CUDA 12.8), $0.0725 total.
+  `tests/test_gpu_e2e.py` (CUDA-gated, skips without a GPU); harness
+  `scripts/runpod_gpu_e2e.py` (`--plan-only` dry-run). It found a real
+  GPU-only bug the CPU/gloo suite could not: batches must move to
+  `ft.device()`.
+- **Release engineering** (July 2026): CI matrix (Python 3.10–3.13 ×
+  ubuntu/macos) with a pydantic-only core-smoke job, a docs link-check, and
+  a bench-smoke; tag-triggered release (PyPI Trusted Publishing, test-gated,
+  + GitHub Pages); `scripts/audit_secrets.sh` (worktree + history scan,
+  CLEAN); `CONTRIBUTING.md` / `SECURITY.md` / `CHANGELOG.md`; PEP 561
+  `py.typed`, built docs bundled in the wheel.
+- Tests: `pytest` → **237 passed, 1 skipped** (the CUDA-gated GPU test),
+  9 deselected (integration + bench_smoke, opt-in via `-m`; live in
   `tests/integration/` with env auto-skip). Images: `deploy/docker/`.
   Full-loop proof: workspace-root `e2e/` (`make e2e`, `make e2e-demo`) +
-  in-repo `tests/test_examples_e2e.py` (4 real bring-your-code e2e tests).
-  POC runbook: workspace-root `archive/POC_PLAN.md` + Makefile.
+  in-repo `tests/test_examples_e2e.py` (4 real bring-your-code e2e tests,
+  incl. kill-at-60 → bit-exact resume). POC runbook: workspace-root
+  `archive/POC_PLAN.md` + Makefile.
 
 ## Status vs. plan (what's done, what's missing)
 
 Architecture decisions: `docs/adr/0003-…` + workspace-root
 `FLASHRUNTIME_EVALUATION.md`; execution log: workspace-root `PROGRESS.md`.
 
-**Done (July 2026, local milestone):** Mode A lease coordinator over HTTP
-(claim/heartbeat/complete/fail; commit-time sha256 validation against the
-task's commit_key; join-code-gated registration; artifact size caps);
-durable `SqliteLeaseStore` (in-flight leases survive coordinator restarts —
-agents re-register on their own); job→task expansion for
-`hyperparameter_search` and `sharded_kmeans`; checkpoint HTTP surface
-(task-scoped catalog: parts/commit/latest/lost-work); three task modules in
-`flashml_workloads/` (sklearn_trial, kmeans_shard+driver, sgd_trainer with
-bit-identical resume); dashboard at GET /; the planner. Proven by
-workspace-root `e2e/` (kill-a-machine sweep, K-means convergence,
-cross-machine training resume).
+**Done (July 2026, deploy-ready milestone):** the 0.1.0 feature set.
+Bring-your-own-code SDK (`flash.submit(CommandWorkload)`) + `flashruntime
+submit`/`submit-spec` CLI; sklearn/pytorch/HF integration adapters +
+optional `flashruntime.torch` helper; automatic SDK recovery (`max_restarts`
+→ classify/decide, one-call kill-and-resume proven in
+`tests/test_examples_e2e.py`); live run viewer opening on `--watch`;
+PyTorch-style docs site (built + served at `/docs` + Pages-ready); honest
+benchmark suite + measured M4 baseline; CI matrix + test-gated trusted
+publishing + secrets audit CLEAN; real-GPU validation (2×RTX 4090, nccl,
+$0.0725). Earlier local-milestone core still stands: Mode A lease
+coordinator over HTTP (claim/heartbeat/complete/fail; commit-time sha256
+validation; join-code registration; artifact size caps); durable
+`SqliteLeaseStore` (in-flight leases survive restarts); job→task expansion
+for `hyperparameter_search`/`sharded_kmeans`; checkpoint HTTP surface;
+`flashml_workloads/` task modules; dashboard at GET /; the planner. Proven
+by workspace-root `e2e/` (kill-a-machine sweep, K-means convergence,
+cross-machine resume). Suite: **237 passed, 1 skipped, 9 deselected**.
 
 **Missing (in rough priority order):**
-1. Stage-8 metrics from the ledger (MTTD/MTTR/goodput/lost-work) + case
-   study — every needed event already exists.
-2. Checkpoint-manifest persistence (catalog is in-memory; checkpoint
-   *files* are durable — manifests die with the coordinator).
-3. `recovery/` wiring into the service: today recovery is the implicit
-   lease-expiry path; `classify()`/`decide()` are tested but uncalled, and
-   FAILURE_CLASSIFIED / RECOVERY_ACTION_SELECTED events never fire.
-4. `flash.run(plan)`: planner and executor exist but aren't linked — the
-   e2e plans and then builds the JobSpec by hand.
-5. Cloud stage: Postgres (same append-only schema), SSE instead of
-   polling, ACK/KubeRay hybrid pool, `recipes/` (HF Trainer + PEFT LoRA on
-   the sgd_trainer checkpoint contract), `strategies/` + `launchers/`.
+1. **Multi-node DDP rendezvous** — `nnodes > 1` in the pytorch adapter
+   raises `NotImplementedError` today; single-node (`--standalone`) is the
+   proven path. GPU is validated single-node; multi-node GPU rendezvous is
+   a later launcher slice.
+2. **FlashNode argv runner** (cross-repo): service-side command jobs expand
+   + lease + placement-check today, but *executing* the `argv` payload
+   waits on flashnode's argv runner tier.
+3. **Checkpoint-manifest persistence** — catalog is in-memory; checkpoint
+   *files* are durable, so manifests die with the coordinator.
+4. **Stage-8 ledger metrics** (MTTD/MTTR/goodput/lost-work) + case study —
+   every needed event already exists.
+5. Service-side recovery wiring — the SDK path fires classify/decide +
+   FAILURE_CLASSIFIED / RECOVERY_ACTION_SELECTED, but the *coordinator*
+   still recovers via implicit lease-expiry.
+6. `flash.run(plan)` — planner and executor exist but aren't linked (raises
+   `NotImplementedError`); e2e plans then builds the JobSpec by hand.
+7. Cloud stage: Postgres (same append-only schema), SSE instead of
+   polling, ACK/KubeRay hybrid pool, HF Trainer + PEFT LoRA recipes on the
+   sgd_trainer checkpoint contract.
 
 ## Dev workflow
 
 ```bash
 uv venv && uv pip install -e ".[sklearn,dev]"
-pytest                    # 109 unit tests (+ opt-in: pytest -m integration)
+pytest                    # 237 passed, 1 skipped (CUDA-gated), 9 deselected
+                          #   (+ opt-in: pytest -m integration / -m bench_smoke)
 ```
 
 Python ≥3.10, Pydantic for new schemas, pytest for everything. Match existing
