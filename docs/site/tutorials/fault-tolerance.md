@@ -81,7 +81,10 @@ it wrong:
 `recovery.classify(signals)` maps the signals to exactly one
 `FailureClass`, precedence-ordered so **systemic evidence beats node evidence
 beats process evidence beats application evidence** — a worker crash *during* a
-correlated incident is the incident, not the worker. The full taxonomy:
+correlated incident is the incident, not the worker. The classes
+`classify()` can produce locally (the full `FailureClass` enum has two more —
+`data_error`, `network_degradation` — reachable only with coordinator-side
+signals):
 
 ```
 correlated_incident      systemic: many failures in the window — stop acting

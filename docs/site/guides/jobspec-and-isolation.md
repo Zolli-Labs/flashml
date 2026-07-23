@@ -93,3 +93,16 @@ serializes any `CommandWorkload`, whatever built it (`fr_torch.ddp`,
 framework adapter (see the [PyTorch adapter](pytorch.md#adding-another-framework))
 gets coordinator submission and isolation-aware placement for free — it only
 has to return a `CommandWorkload`.
+
+---
+
+## Built-in task modules
+
+Besides `command` workloads, the coordinator ships three allowlisted task
+modules under `flashml_workloads/` — `sklearn_trial` (hyperparameter
+trials), `kmeans_shard`/`kmeans_driver` (sharded K-means), and
+`sgd_trainer` (checkpointable SGD with bit-identical resume). They are
+reference workloads for the lease protocol, not a required path: they
+predate `command` workloads and remain the workspace e2e's proof fixtures.
+Their contract is documented in each module's docstring and in the repo's
+`AGENTS.md`.

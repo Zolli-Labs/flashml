@@ -65,6 +65,7 @@ class CommandWorkload(BaseModel):
     env: dict[str, str] = {}
     inputs: dict[str, str] = {}              # each value must be an artifact:// URI
     outputs: OutputSpec = OutputSpec()
+    resources: Requirements = Requirements() # resource hints (dormant locally; for future providers)
     isolation: IsolationSpec = IsolationSpec()
     mode: str = "auto"                       # auto | local | independent_tasks | coordinated
     checkpoint: CheckpointPolicy | None = None
