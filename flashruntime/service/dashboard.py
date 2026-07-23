@@ -12,7 +12,9 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-_PAGE = """<!doctype html>
+from flashruntime.viewer.page import TOKENS
+
+_RAW_PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -149,6 +151,36 @@ tick(); setInterval(tick, 2000);
 </script>
 </body>
 </html>"""
+
+
+# Palette alignment: the dashboard was built with ad-hoc GitHub-dark hexes;
+# map each to the shared token in `viewer.page.TOKENS` so this page and the
+# run viewer read as one house style. VALUES only — the page structure is
+# untouched. The neutrals map to themselves; the accents pick up the oklch
+# tokens (cyan running, green ok, amber warn, red fail, violet checkpoints).
+_PALETTE = {
+    "#0d1117": TOKENS["bg"],
+    "#161b22": TOKENS["panel"],
+    "#21262d": TOKENS["border"],
+    "#c9d1d9": TOKENS["text"],
+    "#e6edf3": TOKENS["text_bright"],
+    "#8b949e": TOKENS["muted"],
+    "#3fb950": TOKENS["ok"],  # on / SUCCEEDED / COMPLETED
+    "#f85149": TOKENS["fail"],  # off / FAILED
+    "#58a6ff": TOKENS["running"],  # RUNNING / links
+    "#d29922": TOKENS["warn"],  # LEASED / RECOVERING
+    "#d2a8ff": TOKENS["ckpt"],  # event type accent
+}
+
+
+def _recolor(page: str) -> str:
+    """Swap every ad-hoc hex for its shared token (single source of truth)."""
+    for old, new in _PALETTE.items():
+        page = page.replace(old, new)
+    return page
+
+
+_PAGE = _recolor(_RAW_PAGE)
 
 
 def build_router() -> APIRouter:

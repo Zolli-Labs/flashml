@@ -18,9 +18,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
+import webbrowser
 from pathlib import Path
 
 from flashruntime.launchers import LaunchState
@@ -32,6 +34,12 @@ from flashruntime.strategies.command import compile_workload
 from flashruntime.workloads.command import CommandWorkload
 
 _JOB_ID = "local"  # deterministic: rerunning with the same output_dir resumes checkpoints
+
+# Viewers opened by watch=True. A RunViewerServer runs on a daemon thread, so
+# it never blocks interpreter exit; we hold a reference here so it survives for
+# the whole process lifetime (a wait=True submit returns before the human is
+# done looking at the page, and the server must outlive that return).
+_VIEWERS: list = []
 
 
 class Run:
@@ -58,6 +66,7 @@ class Run:
         self.state: LaunchState = LaunchState.PENDING
         self.trials: list[dict] = []
         self.artifacts: list[Path] = []
+        self.viewer_url: str | None = None  # set when submit(watch=True) opens a live viewer
         self.started_at: float = time.time()
         self.finished_at: float | None = None
         self._logs: list[str] = []
@@ -194,21 +203,66 @@ class Run:
         return max(scored, key=lambda t: t[metric]) if maximize else min(scored, key=lambda t: t[metric])
 
 
+def _watch_enabled(watch: bool | None) -> bool:
+    """Resolve the `watch` tri-state. Explicit True/False wins; None is auto —
+    on only at an interactive terminal AND outside CI. A pipeline or a piped
+    stdout must never open a browser or hold a server open, so auto stays off
+    there even though the run is identical."""
+    if watch is not None:
+        return watch
+    return sys.stdout.isatty() and os.environ.get("CI") is None
+
+
+def _open_viewer(run: Run) -> None:
+    """Start a read-only RunViewerServer over the run's output dir, record its
+    URL on the Run, open a browser at it, and keep the server alive for the
+    process lifetime (`_VIEWERS`). Best-effort by design: the viewer is a
+    convenience layered on top of the run, never load-bearing — a headless box
+    with no browser, or a port that will not bind, must still run the job. So
+    every failure here is swallowed and the submit proceeds unwatched."""
+    try:
+        from flashruntime.viewer.server import RunViewerServer
+
+        server = RunViewerServer(run.output_dir)
+        url = server.start()
+        _VIEWERS.append(server)  # hold a reference: daemon thread, freed at exit
+        run.viewer_url = url
+        print(f"viewer: {url}")
+        try:
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001 — headless / no browser must not fail the run
+            pass
+    except Exception:  # noqa: BLE001 — the viewer must never be able to fail a submit
+        pass
+
+
 def submit(
     workload: CommandWorkload,
     output_dir: str | Path | None = None,
     wait: bool = True,
     max_restarts: int = 0,
+    watch: bool | None = None,
 ) -> Run:
     """Run a CommandWorkload locally. `max_restarts` (default 0 — no retry, the
     old behavior) is the automatic fault-tolerance budget: a FAILED attempt is
     classified and run against the versioned recovery policy, and unless the
     failure is a deterministic application error (FAIL_JOB → fail fast) the
     same spec is relaunched from the job-scoped checkpoint, up to this many
-    times. Applies to a single launch and per-trial in a fan-out."""
+    times. Applies to a single launch and per-trial in a fan-out.
+
+    `watch` opens the live run page (`flashruntime.viewer`) in a browser and
+    prints its URL (recorded on `Run.viewer_url`). None (default) auto-decides:
+    on at an interactive terminal, off in pipes/CI. The viewer server binds
+    127.0.0.1 on a daemon thread, so it works for both `wait=True` (it outlives
+    the synchronous return, so the page stays viewable) and `wait=False`."""
     out_root = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="flashruntime-run-"))
     run = Run(workload, out_root, max_restarts=max_restarts)
     launcher = LocalProcessLauncher(out_root)
+
+    # Open the viewer before driving so the page is live for the whole run —
+    # including a wait=False submit the caller watches from the first frame.
+    if _watch_enabled(watch):
+        _open_viewer(run)
 
     fanout = workload.resolved_mode() == "independent_tasks" and workload.task_params
     param_sets: list[dict | None] = list(workload.task_params) if fanout else [None]

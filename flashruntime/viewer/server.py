@@ -3,7 +3,7 @@
 A stdlib `ThreadingHTTPServer` a `flash.submit(watch=True)` opens on the run's
 output_dir. It serves exactly four things and 404s everything else:
 
-  GET /             → the run page (a minimal placeholder until Task 7)
+  GET /             → the live run page (viewer.page.render(); polls /api/state)
   GET /api/state    → state.collect(run_dir) as JSON (the live snapshot)
   GET /docs, /docs/…→ static files under the packaged _docs/ dir, else 404
   (anything else)   → 404
@@ -23,23 +23,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from flashruntime.viewer.page import render as render_page
 from flashruntime.viewer.state import collect
 
 # Packaged docs live here once Task 8's builder has run; absent in a fresh
 # checkout, which is why /docs degrades to an honest "docs not built" 404.
 _DEFAULT_DOCS_DIR = Path(__file__).parent / "_docs"
 
-_PLACEHOLDER_PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>flashruntime run</title></head>
-<body style="font-family:system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem">
-<h1>flashruntime run viewer</h1>
-<p>The live run page arrives in the next release. Until then:</p>
-<ul>
-  <li><a href="/api/state">/api/state</a> &mdash; this run's snapshot as JSON</li>
-  <li><a href="/docs/">/docs/</a> &mdash; documentation</li>
-</ul>
-</body></html>
-"""
+# The run page is a static document (all liveness comes from its /api/state
+# polling), so render it once and reuse the bytes for every GET /.
+_PAGE_BYTES = render_page().encode()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -55,7 +48,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/":
-            self._send(200, "text/html; charset=utf-8", _PLACEHOLDER_PAGE.encode())
+            self._send(200, "text/html; charset=utf-8", _PAGE_BYTES)
         elif path == "/api/state":
             # collect() is total (never raises), so this branch cannot 500 on
             # any on-disk state — it returns a snapshot or an {"error": ...}.

@@ -98,7 +98,12 @@ def test_submit_bad_task_params_is_clean_error_exit_two(tmp_path, capsys):
     assert "Traceback" not in err
 
 
-def test_submit_watch_prints_honest_placeholder(tmp_path, capsys):
+def test_submit_watch_opens_viewer_and_prints_url(tmp_path, capsys, monkeypatch):
+    # --watch opens the live viewer: it prints a loopback URL. webbrowser.open
+    # is stubbed so the test never actually pops a browser.
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda u, *a, **k: opened.append(u) or True)
+
     src = _write_script(
         tmp_path,
         """
@@ -112,7 +117,8 @@ def test_submit_watch_prints_honest_placeholder(tmp_path, capsys):
     )
     assert rc == 0
     stdout = capsys.readouterr().out
-    assert "viewer" in stdout.lower()  # honest placeholder until T7
+    assert "http://127.0.0.1:" in stdout  # the viewer URL is printed
+    assert opened and opened[0].startswith("http://127.0.0.1:")  # browser opened at it
 
 
 def test_unknown_command_is_argparse_error(capsys):

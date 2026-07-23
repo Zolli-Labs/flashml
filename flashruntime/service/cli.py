@@ -74,14 +74,15 @@ def _submit(args) -> int:
         task_params=task_params,
     )
 
-    # --watch defaults on only at a real terminal: in CI/pipes we must never
-    # block on or open a viewer. Until Task 7 ships the viewer this flag just
-    # prints one honest line and proceeds — remove this placeholder in T7.
-    watch = args.watch if args.watch is not None else sys.stdout.isatty()
-    if watch:
-        print("viewer lands with the next feature; running without it")
-
-    run = submit(workload, output_dir=args.output_dir, max_restarts=args.max_restarts)
+    # --watch is a tri-state: True (--watch) / False (--no-watch) / None
+    # (unset → submit() decides by TTY, off in CI). When on, submit() opens
+    # the live viewer and prints its URL, so the CLI just passes it through.
+    run = submit(
+        workload,
+        output_dir=args.output_dir,
+        max_restarts=args.max_restarts,
+        watch=args.watch,
+    )
 
     print(f"state:     {run.state.value}")
     print(f"trials:    {len(run.trials)}")
