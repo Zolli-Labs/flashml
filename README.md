@@ -92,15 +92,16 @@ time. **No LLM in the loop.** Every decision is recorded on the run as
 `FAILURE_CLASSIFIED` / `RECOVERY_ACTION_SELECTED` events.
 
 Kill-and-resume is proven end to end. `tests/test_examples_e2e.py` kills a
-2-process DDP run mid-training and asserts the resumed run's final weights are
-bit-identical to a never-crashed baseline — recovery restores only a verified,
+2-process DDP run mid-training and asserts the resumed run's final loss
+matches a never-crashed baseline to 1e-6 — recovery restores only a verified,
 topology-compatible checkpoint (parts-first / manifest-last: a half-written
 checkpoint can never look valid).
 
 For a script you *are* willing to touch, `import flashruntime.torch as ft` adds
 `ft.prepare` / `ft.checkpoint` / `ft.log_metrics`: torch's own DDP wrapped under
 the same checkpoint contract, with correct per-rank device placement, so a
-killed run resumes bit-identically. It is optional sugar on the launch-only
+killed run resumes with a loss curve indistinguishable from the uninterrupted
+one (1e-6 in the e2e). It is optional sugar on the launch-only
 contract, never required.
 
 **GPU-validated (2026-07-23).** The CUDA paths — `nccl` DDP, per-rank device

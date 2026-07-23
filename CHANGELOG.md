@@ -32,9 +32,9 @@ DDP/FSDP2/torchrun, Ray, Hugging Face).
   convention only (CLI flags in, `metrics.json`/checkpoints out).
 - **`flashruntime.torch`** — a tiny helper (`ft.prepare` / `ft.checkpoint`) that
   gives a plain PyTorch script topology-agnostic, resumable checkpointing and
-  correct device/DDP setup with a few lines. Bit-identical resume from the
-  newest valid manifest; save writes CPU tensors so manifests stay
-  topology-compatible.
+  correct device/DDP setup with a few lines. Resumes from the newest valid
+  manifest (e2e asserts the resumed final loss matches an uninterrupted run
+  to 1e-6); save writes CPU tensors so manifests stay topology-compatible.
 - **Automatic fault tolerance** via `flash.submit(..., max_restarts=N)`: a
   failed launch is classified (`recovery.classify`) and a typed action chosen
   (`recovery.decide`); transient failures relaunch from the last valid

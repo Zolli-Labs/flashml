@@ -93,7 +93,8 @@ definition.
 > `import flashruntime.torch as ft` gives you `ft.prepare(...)`,
 > `ft.checkpoint(...)`, and `ft.log_metrics(...)` — torch's own DDP wrapped
 > under the parts-first / manifest-last checkpoint contract, so a killed run
-> resumes bit-identically. It is optional sugar on the same launch-only
+> resumes with its final loss matching an uninterrupted run to 1e-6 (the
+> e2e's assertion). It is optional sugar on the same launch-only
 > contract, never required.
 
 The same `flashruntime.torch` path runs unchanged on GPUs — `ft.prepare`

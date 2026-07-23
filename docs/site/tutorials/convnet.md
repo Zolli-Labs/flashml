@@ -205,8 +205,8 @@ What each added call does — and *nothing more* (this is the whole surface):
   `metrics.jsonl`; this is the streaming series the live page draws as a loss
   curve. It never raises.
 
-The full surface is exactly seven functions — see the
-[torch helper reference](../reference/torch-helper.md). There are no FSDP
+The full surface is three verbs plus read-only launch-fact accessors — see
+the [torch helper reference](../reference/torch-helper.md). There are no FSDP
 policies, no autocast, no DeepSpeed config here: that is deliberate (ADR-0003 —
 we do not rebuild Accelerate). A script that wants those uses the real
 framework features; the launcher still launches it correctly.

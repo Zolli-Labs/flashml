@@ -143,7 +143,8 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   `tests/integration/` with env auto-skip). Images: `deploy/docker/`.
   Full-loop proof: workspace-root `e2e/` (`make e2e`, `make e2e-demo`) +
   in-repo `tests/test_examples_e2e.py` (4 real bring-your-code e2e tests,
-  incl. kill-at-60 → bit-exact resume). POC runbook: workspace-root
+  incl. kill-at-40 → auto-resume, final loss matching baseline to 1e-6).
+  POC runbook: workspace-root
   `archive/POC_PLAN.md` + Makefile.
 
 ## Status vs. plan (what's done, what's missing)

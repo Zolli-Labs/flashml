@@ -176,5 +176,5 @@ yourself.
 
 - [Integrations](integrations.md) — the `fr_torch` / `fr_sklearn` / `fr_hf`
   adapters that build a `CommandWorkload` for you.
-- [torch helper](torch-helper.md) — the seven `flashruntime.torch` functions.
+- [torch helper](torch-helper.md) — the `flashruntime.torch` surface (three verbs + read-only accessors).
 - [CLI](cli.md) — the `flashruntime` command.

@@ -39,7 +39,7 @@ run = flash.submit(
 
 print(run.state.value)   # "SUCCEEDED" (or "FAILED")
 print(run.artifacts)     # [PosixPath('.../metrics.json'), ...]
-print(run.viewer_url)    # http://127.0.0.1:<port> — the live page (also /docs)
+print(run.viewer_url)    # http://127.0.0.1:<port> — the live run page
 ```
 
 `flash.submit()` compiles that description into a launch spec, runs it as a
@@ -57,7 +57,8 @@ is a `flash.Source`, so `~` is expanded for you.
   `run.viewer_url`). It draws the run's topology, its loss curve, its verified
   checkpoints, and every recovery decision, polling a loopback server with
   **zero external assets**. `watch` defaults to auto: on at an interactive
-  terminal, off in a pipe or CI. The same page is served at `/docs`.
+  terminal, off in a pipe or CI. These docs are served by the same local
+  server at `/docs`.
 
 ## What FlashRuntime does around your job
 
