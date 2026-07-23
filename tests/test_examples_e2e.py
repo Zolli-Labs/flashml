@@ -54,8 +54,15 @@ def test_ddp_two_processes_on_cpu(tmp_path, example):
 
 
 def test_kill_and_resume_reproduces_uninterrupted_result(tmp_path):
-    """Spec §9 criterion 3b: crash mid-training, resubmit, resume from the
-    newest valid manifest — and land on the same final loss."""
+    """Spec §9 criterion 3b: crash mid-training, resume from the newest valid
+    manifest — and land on the same final loss.
+
+    Supersession note (Task 4): this used to be a two-submit choreography — a
+    crashing submit, then a manual resubmit against the same output_dir. It is
+    now ONE submit(max_restarts=1): the SDK classifies the crash (a transient
+    WORKER_CRASH, not a deterministic bug), records the recovery events, and
+    relaunches from the job-scoped checkpoint automatically — no human in the
+    loop. The two-submit form is deleted; this single call is its superset."""
     pytest.importorskip("torch")
     if shutil.which("torchrun") is None:
         pytest.skip("torchrun not on PATH")
@@ -76,13 +83,11 @@ def test_kill_and_resume_reproduces_uninterrupted_result(tmp_path):
     baseline = flash.submit(ddp(), output_dir=tmp_path / "baseline")
     assert baseline.state.value == "SUCCEEDED", baseline.logs()
 
-    workdir = tmp_path / "crashy"
-    crashed = flash.submit(ddp("--kill-at-step 40"), output_dir=workdir)
-    assert crashed.state.value == "FAILED"
-
-    resumed = flash.submit(ddp("--kill-at-step 40"), output_dir=workdir)
+    resumed = flash.submit(ddp("--kill-at-step 40"), output_dir=tmp_path / "crashy", max_restarts=1)
     assert resumed.state.value == "SUCCEEDED", resumed.logs()
     assert resumed.trials[0]["resumed_from"] == 40
     assert resumed.trials[0]["final_loss"] == pytest.approx(
         baseline.trials[0]["final_loss"], abs=1e-6
     )
+    types = [e["type"] for e in resumed.events]
+    assert "FAILURE_CLASSIFIED" in types and "RECOVERY_ACTION_SELECTED" in types

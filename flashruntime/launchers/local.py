@@ -72,6 +72,15 @@ class LocalLaunchHandle(LaunchHandle):
     def execution_id(self) -> str:
         return str(self._proc.pid)
 
+    @property
+    def exit_code(self) -> int | None:
+        """The child's raw OS return code once terminal (None while running).
+        The coarse LaunchState collapses every nonzero exit to FAILED, but
+        recovery needs the number: 137/-9 (signal death) and a bare SystemExit
+        classify differently from an ImportError traceback. Populated by the
+        preceding poll()/wait(); a negative value is a POSIX signal number."""
+        return self._proc.returncode
+
 
 class LocalProcessLauncher(Launcher):
     name = "local"

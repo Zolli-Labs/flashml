@@ -25,13 +25,13 @@ from pathlib import Path
 
 from flashruntime.launchers import LaunchState
 from flashruntime.launchers.local import LocalProcessLauncher
+from flashruntime.protocol.v1alpha1 import RecoveryActionType
+from flashruntime.recovery import classify, decide
+from flashruntime.recovery.signals import from_local_launch
 from flashruntime.strategies.command import compile_workload
 from flashruntime.workloads.command import CommandWorkload
 
 _JOB_ID = "local"  # deterministic: rerunning with the same output_dir resumes checkpoints
-# Contract field for the viewer. The local SDK does not restart yet (recovery
-# is Task 4); until it does, the honest declared budget is a single restart.
-_MAX_RESTARTS = 1
 
 
 class Run:
@@ -51,9 +51,10 @@ class Run:
     without polling.
     """
 
-    def __init__(self, workload: CommandWorkload, output_dir: Path):
+    def __init__(self, workload: CommandWorkload, output_dir: Path, max_restarts: int = 0):
         self.workload = workload
         self.output_dir = Path(output_dir)
+        self.max_restarts = max_restarts  # the real recovery budget the viewer reports
         self.state: LaunchState = LaunchState.PENDING
         self.trials: list[dict] = []
         self.artifacts: list[Path] = []
@@ -166,7 +167,7 @@ class Run:
             "state": self.state.value,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "max_restarts": _MAX_RESTARTS,
+            "max_restarts": self.max_restarts,
             "attempts": [dict(a) for a in self._attempts],
             "events": [dict(e) for e in self._events],
             "trials": [dict(t) for t in self.trials],
@@ -194,10 +195,19 @@ class Run:
 
 
 def submit(
-    workload: CommandWorkload, output_dir: str | Path | None = None, wait: bool = True
+    workload: CommandWorkload,
+    output_dir: str | Path | None = None,
+    wait: bool = True,
+    max_restarts: int = 0,
 ) -> Run:
+    """Run a CommandWorkload locally. `max_restarts` (default 0 — no retry, the
+    old behavior) is the automatic fault-tolerance budget: a FAILED attempt is
+    classified and run against the versioned recovery policy, and unless the
+    failure is a deterministic application error (FAIL_JOB → fail fast) the
+    same spec is relaunched from the job-scoped checkpoint, up to this many
+    times. Applies to a single launch and per-trial in a fan-out."""
     out_root = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="flashruntime-run-"))
-    run = Run(workload, out_root)
+    run = Run(workload, out_root, max_restarts=max_restarts)
     launcher = LocalProcessLauncher(out_root)
 
     fanout = workload.resolved_mode() == "independent_tasks" and workload.task_params
@@ -218,46 +228,88 @@ def _drive(
     run: Run, workload: CommandWorkload, launcher: LocalProcessLauncher, param_sets: list
 ) -> None:
     """The compile → launch → wait → collect loop, once per param set, then
-    settle the Run's terminal state. Extracted verbatim from submit() so
-    wait=True can call it inline (identical to the old synchronous path) and
-    wait=False can run it on a daemon thread; the only additions are the
-    run.json transition writes (state/attempt/event) around the unchanged
-    collection logic."""
+    settle the Run's terminal state. Extracted from submit() so wait=True can
+    call it inline (identical to the old synchronous path) and wait=False can
+    run it on a daemon thread.
+
+    Around each param set is the automatic-recovery loop (Task 4): on a FAILED
+    launch, translate the exit into FailureSignals, classify it, and run the
+    versioned policy — fail fast on a deterministic bug (FAIL_JOB), else
+    relaunch from the job-scoped checkpoint until the restart budget is spent.
+    `run.max_restarts == 0` reduces this to exactly one launch, the pre-Task-4
+    behavior."""
     run._set_state(LaunchState.RUNNING)
     source_dir = Path(workload.source.path).expanduser()
 
     fanout = workload.resolved_mode() == "independent_tasks" and workload.task_params
+    # The policy's blast-radius axis: independent trials retry one task; a
+    # single/coordinated run restarts the whole (coordinated-training) group.
+    mode = "independent_tasks" if fanout else "coordinated_training"
 
     states: list[LaunchState] = []
     for i, params in enumerate(param_sets):
-        attempt_id = f"task-{i:03d}"
+        base_attempt = f"task-{i:03d}"
         # Fan-out trials are DIFFERENT workloads (distinct params) — each needs
         # its own checkpoint tree, or trial i could restore trial j's weights
         # (FLASHML_CKPT_DIR is per job id). The single-workload path keeps the
         # stable "local" id so a resubmit against the same output_dir resumes.
         job_id = f"local-{i:03d}" if fanout else _JOB_ID
         spec = compile_workload(workload, params)
-        started_at = time.time()
-        handle = launcher.launch(spec, job_id, attempt_id)
-        run.record_event("LAUNCH_STARTED", f"{attempt_id} launched (pid {handle.execution_id})")
-        run._add_attempt(attempt_id, job_id, handle, started_at)
-        state = handle.wait()
-        states.append(state)
-        run._logs.append(f"--- {attempt_id} ({state.value}) ---\n{handle.logs()}")
-        run._finish_attempt(attempt_id, state)
 
-        collected = _collect(source_dir, workload.outputs.collect, handle.output_dir, since=started_at)
-        run.artifacts.extend(collected)
-        metrics_path = handle.output_dir / "metrics.json"
-        if metrics_path.is_file():
-            try:
-                metrics = json.loads(metrics_path.read_text())
-            except ValueError:
-                metrics = None
-            if isinstance(metrics, dict):
-                if params:
-                    metrics.setdefault("params", params)
-                run.trials.append(metrics)
+        final_state = LaunchState.FAILED
+        trial_metrics: dict | None = None
+        # restart 0 is the first try; 1..max_restarts are recovery attempts.
+        for restart in range(run.max_restarts + 1):
+            # Restart attempts append -r1/-r2… but keep the SAME job_id, so the
+            # launcher's job-scoped FLASHML_CKPT_DIR is shared across attempt
+            # names — that is the whole trick: the child's ft.prepare() resumes
+            # from the predecessor's newest valid manifest even though this
+            # attempt has a different id.
+            attempt_id = base_attempt if restart == 0 else f"{base_attempt}-r{restart}"
+            started_at = time.time()
+            handle = launcher.launch(spec, job_id, attempt_id)
+            run.record_event("LAUNCH_STARTED", f"{attempt_id} launched (pid {handle.execution_id})")
+            run._add_attempt(attempt_id, job_id, handle, started_at)
+            final_state = handle.wait()
+            run._logs.append(f"--- {attempt_id} ({final_state.value}) ---\n{handle.logs()}")
+            run._finish_attempt(attempt_id, final_state)
+
+            collected = _collect(source_dir, workload.outputs.collect, handle.output_dir, since=started_at)
+            run.artifacts.extend(collected)
+            metrics_path = handle.output_dir / "metrics.json"
+            if metrics_path.is_file():
+                try:
+                    metrics = json.loads(metrics_path.read_text())
+                except ValueError:
+                    metrics = None
+                if isinstance(metrics, dict):
+                    if params:
+                        metrics.setdefault("params", params)
+                    trial_metrics = metrics  # the winning attempt's metrics (one trial per param set)
+
+            if final_state is LaunchState.SUCCEEDED:
+                break
+
+            # FAILED: consult the recovery policy. Signals → class → decision,
+            # both events recorded (with the decision's human reason) so the
+            # ledger/viewer can explain every retry.
+            exit_code = handle.exit_code
+            decision = decide(classify(from_local_launch(exit_code, handle.logs())), mode)
+            run.record_event(
+                "FAILURE_CLASSIFIED", f"{attempt_id}: {decision.failure_class.value} (exit {exit_code})"
+            )
+            run.record_event(
+                "RECOVERY_ACTION_SELECTED", f"{attempt_id}: {decision.action.value} — {decision.reason}"
+            )
+            # Fail fast on a deterministic application error — a retry only
+            # re-hits the same bug. Any other action means "retry", and the
+            # loop's range() enforces the budget, so it cannot spin forever.
+            if decision.action is RecoveryActionType.FAIL_JOB:
+                break
+
+        if trial_metrics is not None:
+            run.trials.append(trial_metrics)
+        states.append(final_state)
 
     run._set_state(
         LaunchState.SUCCEEDED
