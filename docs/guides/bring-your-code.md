@@ -179,9 +179,10 @@ What each does:
   **CUDA device placement is wired.** `prepare` selects `nccl` when CUDA is
   present, moves your model onto this rank's GPU *before* the DDP wrap, and
   binds DDP with `device_ids`/`output_device` — so a single-GPU box "just
-  works" and you no longer call `model.to(device)` yourself. This GPU path is
-  validated on RunPod (see workspace-root `PROGRESS.md`); the everyday e2e
-  tests still exercise CPU / `gloo`. **Multi-node DDP (`nnodes > 1`) is a later
+  works" and you no longer call `model.to(device)` yourself. Real-GPU
+  validation on RunPod is in progress and will be recorded in workspace-root
+  `PROGRESS.md` when it lands; the everyday e2e
+  tests exercise CPU / `gloo`. **Multi-node DDP (`nnodes > 1`) is a later
   slice** — cross-machine rendezvous is a launcher concern (spec §10).
 
   One caveat worth knowing: `prepare` rebuilds the DataLoader carrying over
