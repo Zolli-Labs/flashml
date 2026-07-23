@@ -11,11 +11,13 @@ Launched by torchrun (WORLD_SIZE>1): prepare() wires torch's OWN DDP +
 DistributedSampler and restores the newest VALID checkpoint manifest.
 Launched as plain `python train.py`: prepare() is a no-op passthrough.
 
-GUARDRAIL (ADR-0003 — do not rebuild Accelerate): the complete surface is
-prepare / checkpoint / log_metrics / rank / world_size / is_main /
-start_step. No FSDP policies, no autocast, no DeepSpeed config — users
-wanting those use the real framework features, which the launcher still
-launches correctly.
+GUARDRAIL (ADR-0003 — do not rebuild Accelerate): this module wires
+torch's own primitives and REPORTS launch facts — nothing more. The
+surface is prepare / checkpoint / log_metrics plus read-only accessors
+(rank / world_size / is_main / start_step / device / backend). The
+boundary is capability, not count: no FSDP policies, no autocast, no
+DeepSpeed config, no strategy knobs — ever. Users wanting those use the
+real framework features, which the launcher still launches correctly.
 
 torch is imported inside functions only: flashruntime's core never
 depends on it.

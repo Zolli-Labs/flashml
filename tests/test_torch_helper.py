@@ -45,6 +45,15 @@ def test_checkpoint_every_gating(ft, tmp_path):
     assert (tmp_path / "ckpt" / "step-000010" / "manifest.json").is_file()
 
 
+def test_device_and_backend_accessors_report_single_process_defaults(ft):
+    # read-only launch-fact accessors (T12, reviewer-blessed): before/without
+    # a distributed prepare(), a CPU box reports device "cpu" and no backend
+    model = _model()
+    ft.prepare(model, None, None)
+    assert ft.device() == "cpu"
+    assert ft.backend() is None
+
+
 def test_checkpoint_every_zero_is_a_noop_not_a_crash(ft, tmp_path):
     # every<=0 means "no periodic checkpointing" — a fault-tolerance helper
     # must never itself crash training over a config value (used to raise

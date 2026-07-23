@@ -5,10 +5,11 @@ The optional in-training-script helper: one import
 launch-anywhere and fault-tolerant. `torch` is imported **inside** these
 functions only — FlashRuntime's core never depends on it.
 
-The complete surface is exactly **seven functions** — a deliberate guardrail
-(ADR-0003: do not rebuild Accelerate). There are no FSDP policies, no autocast,
-no DeepSpeed config here. Signatures are exact; each says, in one line, *why it
-exists*.
+The surface is three verbs plus read-only launch-fact accessors — a
+deliberate guardrail (ADR-0003: do not rebuild Accelerate). The boundary is
+*capability*, not count: there are no FSDP policies, no autocast, no
+DeepSpeed config here, and there never will be. Signatures are exact; each
+says, in one line, *why it exists*.
 
 ```python
 def prepare(model, optimizer=None, dataloader=None): ...
@@ -18,6 +19,8 @@ def start_step() -> int: ...
 def rank() -> int: ...
 def world_size() -> int: ...
 def is_main() -> bool: ...
+def device() -> str: ...          # "cpu" or "cuda:N" — where prepare() put the model
+def backend() -> str | None: ...  # "gloo"/"nccl", None when single-process
 ```
 
 ---

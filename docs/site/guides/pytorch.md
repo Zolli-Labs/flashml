@@ -50,7 +50,7 @@ definition.
 
 For a script you *are* willing to touch, one import makes it both
 launch-anywhere and fault-tolerant, without rebuilding any framework machinery.
-The complete surface is **seven functions**:
+The surface is three verbs plus read-only launch-fact accessors:
 
 ```python
 import flashruntime.torch as ft
@@ -94,8 +94,10 @@ if ft.is_main():                               # ft.rank(), ft.world_size() too
   never raises — metrics must never kill training. This is *separate* from the
   final `metrics.json` your script writes for `run.trials`.
 
-- **`start_step()` / `rank()` / `world_size()` / `is_main()`** — the small
-  positional helpers. Full signatures in the
+- **`start_step()` / `rank()` / `world_size()` / `is_main()` / `device()` /
+  `backend()`** — the small read-only helpers (`device()`/`backend()` let a
+  script report where it actually trained, e.g. into `metrics.json` — how
+  the GPU e2e proves the CUDA/nccl path). Full signatures in the
   [torch helper reference](../reference/torch-helper.md).
 
 The same file, three ways:

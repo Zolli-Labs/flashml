@@ -69,7 +69,7 @@ Run: `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest -q` → expect **18
 - Test: `tests/test_torch_helper.py` (extend)
 
 **Interfaces:**
-- Produces: pure helper `_resolve_device(world_size: int, cuda_available: bool, local_rank: int) -> str` returning `"cpu"` or `f"cuda:{local_rank}"`; `prepare()` moves the model to that device *before* DDP wrap and passes `device_ids=[local_rank]` + `output_device=local_rank` when on CUDA; restore uses `map_location=device`; `checkpoint()` moves state dicts to CPU before save (unchanged manifests contract). Surface stays exactly the 7 functions (guardrail).
+- Produces: pure helper `_resolve_device(world_size: int, cuda_available: bool, local_rank: int) -> str` returning `"cpu"` or `f"cuda:{local_rank}"`; `prepare()` moves the model to that device *before* DDP wrap and passes `device_ids=[local_rank]` + `output_device=local_rank` when on CUDA; restore uses `map_location=device`; `checkpoint()` moves state dicts to CPU before save (unchanged manifests contract). Surface stays exactly the 7 functions (guardrail). *(Amended in T12, reviewer-blessed: +`device()`/`backend()` read-only accessors — the guardrail is capability, not count.)*
 
 - [ ] **Step 1: Write failing tests** (CPU-runnable — the device *decision* is pure):
 

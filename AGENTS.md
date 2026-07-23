@@ -97,7 +97,8 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   `StrategyCompiler`, since a StrategyPlan carries no argv). Thin
   framework adapters in `integrations/` (sklearn sweeps, pytorch DDP, HF
   Trainer callback — no framework imports at module level) + the optional
-  in-script `flashruntime.torch` helper (7-fn surface: prepare/checkpoint/
+  in-script `flashruntime.torch` helper (3 verbs + read-only accessors incl.
+  device/backend — capability guardrail, not a count: prepare/checkpoint/
   log_metrics/rank/world_size/is_main/start_step; wraps torch's own DDP and
   stops — ADR-0003 guardrail). Service-side command jobs expand + lease
   with fail-closed sandbox placement (`scheduler.IsolationAwarePlacement`);
