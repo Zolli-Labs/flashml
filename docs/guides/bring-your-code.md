@@ -176,11 +176,13 @@ What each does:
   the newest *valid* checkpoint manifest if one exists, setting the resume
   step. Launched as plain `python train.py`, it is a no-op passthrough.
 
-  **GPU DDP is a later slice.** `prepare` *selects* `nccl` when CUDA is present
-  but does **not** yet move your model to the device for you — multi-GPU DDP is
-  not exercised end-to-end. The proven path today is CPU / `gloo` (what the e2e
-  tests run); on GPU you still call `model.to(device)` yourself, and treat the
-  distributed GPU wiring as unverified until that slice lands.
+  **CUDA device placement is wired.** `prepare` selects `nccl` when CUDA is
+  present, moves your model onto this rank's GPU *before* the DDP wrap, and
+  binds DDP with `device_ids`/`output_device` — so a single-GPU box "just
+  works" and you no longer call `model.to(device)` yourself. This GPU path is
+  validated on RunPod (see workspace-root `PROGRESS.md`); the everyday e2e
+  tests still exercise CPU / `gloo`. **Multi-node DDP (`nnodes > 1`) is a later
+  slice** — cross-machine rendezvous is a launcher concern (spec §10).
 
   One caveat worth knowing: `prepare` rebuilds the DataLoader carrying over
   `batch_size`, `collate_fn`, `num_workers`, and `drop_last` — **`shuffle` and

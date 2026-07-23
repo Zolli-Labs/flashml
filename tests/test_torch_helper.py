@@ -75,6 +75,24 @@ def test_corrupted_checkpoint_is_never_restored(ft, tmp_path):
     assert ft.start_step() == 5  # fell back to the older VALID manifest
 
 
+def test_resolve_device_is_pure_and_explicit():
+    from flashruntime.torch import _resolve_device
+
+    assert _resolve_device(world_size=1, cuda_available=False, local_rank=0) == "cpu"
+    assert _resolve_device(world_size=2, cuda_available=False, local_rank=1) == "cpu"
+    assert _resolve_device(world_size=1, cuda_available=True, local_rank=0) == "cuda:0"
+    assert _resolve_device(world_size=4, cuda_available=True, local_rank=3) == "cuda:3"
+
+
+def test_checkpoint_state_dicts_are_cpu(ft, tmp_path):
+    # saved tensors must be CPU regardless of training device, so manifests
+    # stay topology- and device-agnostic (restore maps them wherever needed)
+    model = _model()
+    ft.checkpoint(model, step=5)
+    state = torch.load(tmp_path / "ckpt" / "step-000005" / "model.pt", map_location=None)
+    assert all(t.device.type == "cpu" for t in state.values())
+
+
 def test_log_metrics_appends_jsonl_and_never_raises(ft, tmp_path, monkeypatch):
     ft.log_metrics({"loss": 1.0})
     ft.log_metrics({"loss": 0.5})

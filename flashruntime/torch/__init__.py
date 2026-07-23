@@ -40,6 +40,22 @@ __all__ = [
 _restored_step = 0
 
 
+def _resolve_device(world_size: int, cuda_available: bool, local_rank: int) -> str:
+    """Decide the training device from launch facts alone — returns ``"cpu"``
+    or ``f"cuda:{local_rank}"``.
+
+    Kept pure (no torch import, no globals) so the device *decision* is
+    testable on this CPU-only box: the CUDA code paths in ``prepare`` that
+    consume the result cannot execute here, but the choice they depend on
+    can. ``world_size`` is part of the launch-facts signature; the device
+    string itself depends only on whether CUDA is present and which local
+    rank this process owns.
+    """
+    if cuda_available:
+        return f"cuda:{local_rank}"
+    return "cpu"
+
+
 def world_size() -> int:
     return int(os.environ.get("WORLD_SIZE", "1"))
 
@@ -76,15 +92,30 @@ def prepare(model, optimizer=None, dataloader=None):
     global _restored_step
     import torch
 
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    device = _resolve_device(world_size(), torch.cuda.is_available(), local_rank)
+    on_cuda = device != "cpu"
+
+    if on_cuda:
+        # place the model on this rank's GPU BEFORE the DDP wrap (and for a
+        # single-process GPU box too — the "just works on a GPU" path). This
+        # branch is CUDA-only and never runs on the CPU-only test machine.
+        torch.cuda.set_device(local_rank)
+        model = model.to(device)
+
     if world_size() > 1:
         import torch.distributed as dist
 
         if not dist.is_initialized():
             backend = "nccl" if torch.cuda.is_available() else "gloo"
             dist.init_process_group(backend=backend)
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
-        model = torch.nn.parallel.DistributedDataParallel(model)
+        if on_cuda:
+            # bind DDP to the device; gloo/CPU must keep the no-args wrap.
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[local_rank], output_device=local_rank
+            )
+        else:
+            model = torch.nn.parallel.DistributedDataParallel(model)
         if dataloader is not None:
             from torch.utils.data import DataLoader
             from torch.utils.data.distributed import DistributedSampler
@@ -104,9 +135,11 @@ def prepare(model, optimizer=None, dataloader=None):
     if manifest is not None:
         step_dir = Path(manifest.storage_prefix)
         target = model.module if hasattr(model, "module") else model
-        target.load_state_dict(torch.load(step_dir / "model.pt", map_location="cpu"))
+        # load straight onto the live device: CPU-saved (device-agnostic)
+        # parts map onto "cpu" (unchanged) or this rank's "cuda:N".
+        target.load_state_dict(torch.load(step_dir / "model.pt", map_location=device))
         if optimizer is not None and (step_dir / "optimizer.pt").is_file():
-            optimizer.load_state_dict(torch.load(step_dir / "optimizer.pt", map_location="cpu"))
+            optimizer.load_state_dict(torch.load(step_dir / "optimizer.pt", map_location=device))
         _restored_step = manifest.step
 
     return model, optimizer, dataloader
@@ -126,7 +159,11 @@ def checkpoint(model, optimizer=None, *, step: int, every: int | None = None) ->
         step_dir = _ckpt_root() / f"step-{step:06d}"
         step_dir.mkdir(parents=True, exist_ok=True)
         target = model.module if hasattr(model, "module") else model
-        torch.save(target.state_dict(), step_dir / "model.pt")
+        # detach + move to CPU so the saved parts are device-agnostic: a
+        # checkpoint trained on cuda:3 must restore onto cpu or a box with
+        # fewer GPUs (map_location handles the rest at restore time).
+        model_state = {k: v.detach().cpu() for k, v in target.state_dict().items()}
+        torch.save(model_state, step_dir / "model.pt")
         if optimizer is not None:
             torch.save(optimizer.state_dict(), step_dir / "optimizer.pt")
         write_manifest(
