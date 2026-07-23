@@ -311,7 +311,7 @@ jobspec = to_jobspec(
     name="my-sweep",
     image=ImageSpec(repository="myrepo/trainer", tag="2026.07-a1b2c3"),
 )
-# POST jobspec.model_dump() to  POST /v1alpha1/jobs  (or: flashruntime submit spec.json)
+# POST jobspec.model_dump() to  POST /v1alpha1/jobs  (or: flashruntime submit-spec spec.json)
 ```
 
 `to_jobspec` produces `JobSpec{execution.backend: "leases", workload.type:

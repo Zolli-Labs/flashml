@@ -119,3 +119,53 @@ def test_unknown_command_is_argparse_error(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["frobnicate"])
     assert exc.value.code == 2  # argparse usage error
+
+
+# --- submit-spec: the restored pre-0.1.0 JobSpec POST (was `submit`) ---------
+
+
+def test_submit_spec_posts_jobspec_to_api(tmp_path, capsys, monkeypatch):
+    """`submit-spec FILE` reads a JobSpec YAML and POSTs it to the coordinator.
+
+    The handler's real plumbing is `httpx.post`, so we monkeypatch that (no
+    running coordinator) and assert the URL and the parsed payload.
+    """
+    import httpx
+
+    spec_file = tmp_path / "job.yaml"
+    spec_file.write_text("apiVersion: flashml.dev/v1alpha1\nkind: Job\nname: my-sweep\n")
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"id": "job-123", "state": "PENDING"}
+
+    def _fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    rc = main(["--api", "http://api.example:8100", "submit-spec", str(spec_file)])
+    assert rc == 0
+    assert captured["url"] == "http://api.example:8100/v1alpha1/jobs"
+    assert captured["json"] == {
+        "apiVersion": "flashml.dev/v1alpha1",
+        "kind": "Job",
+        "name": "my-sweep",
+    }
+    assert "job-123" in capsys.readouterr().out
+
+
+def test_submit_spec_missing_file_exits_nonzero_with_clear_message(tmp_path):
+    """A missing spec file fails before any HTTP call (verbatim pre-0.1.0
+    behavior: `open()` raises), surfacing a clear, filename-bearing error —
+    which at the CLI boundary is a non-zero exit."""
+    missing = tmp_path / "does-not-exist.yaml"
+    with pytest.raises(FileNotFoundError) as exc:
+        main(["--api", "http://api.example:8100", "submit-spec", str(missing)])
+    assert str(missing) in str(exc.value)

@@ -4,6 +4,7 @@ local "bring your own code" front door.
   flashruntime plan path/to/plan.yaml [--json]   # no API/cluster needed
   flashruntime submit "python train.py" [--source DIR] [--task-params JSON] \
       [--max-restarts N] [--output-dir DIR] [--watch|--no-watch]  # local, no API
+  flashruntime submit-spec path/to/job.yaml [--api URL]  # POST a JobSpec to the coordinator
   flashruntime status <job-id>
   flashruntime events <job-id>
   flashruntime logs <job-id>
@@ -114,6 +115,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,  # None ⇒ decide by TTY in _submit (never block/open a viewer in CI)
         help="open the live viewer (default: on at a terminal, off in pipes/CI)",
     )
+
+    p_submit_spec = sub.add_parser(
+        "submit-spec",
+        help=(
+            "POST a JobSpec YAML to the coordinator — was `submit` before 0.1.0; "
+            "renamed when `submit` became the local-workload front door"
+        ),
+    )
+    p_submit_spec.add_argument("spec_file")
     for name in ("status", "events", "logs", "cancel"):
         p = sub.add_parser(name)
         p.add_argument("job_id")
@@ -129,7 +139,13 @@ def main(argv: list[str] | None = None) -> int:
 
     base = _api(args)
     try:
-        if args.command == "cancel":
+        if args.command == "submit-spec":
+            import yaml
+
+            with open(args.spec_file) as f:
+                spec = yaml.safe_load(f)
+            r = httpx.post(f"{base}/v1alpha1/jobs", json=spec, timeout=60)
+        elif args.command == "cancel":
             r = httpx.post(f"{base}/v1alpha1/jobs/{args.job_id}/cancel", timeout=60)
         elif args.command == "status":
             r = httpx.get(f"{base}/v1alpha1/jobs/{args.job_id}", timeout=30)

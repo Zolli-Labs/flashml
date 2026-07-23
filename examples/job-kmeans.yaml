@@ -1,5 +1,5 @@
 # The POC job: distributed sharded K-Means on Ray via FlashRuntime.
-# Submit with: make poc-local-submit   (or: flashruntime submit examples/job-kmeans.yaml)
+# Submit with: make poc-local-submit   (or: flashruntime submit-spec examples/job-kmeans.yaml)
 apiVersion: flashml.dev/v1alpha1
 kind: Job
 
