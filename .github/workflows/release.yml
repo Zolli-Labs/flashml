@@ -54,6 +54,31 @@ jobs:
           name: dist
           path: dist/
 
+  test:
+    # Gate the publish on the SAME suite CI runs — one representative leg is enough
+    # (ubuntu-latest + Python 3.12, CPU torch, full pytest incl. e2e). A version tag
+    # ships an IMMUTABLE PyPI release, so a broken commit must never reach
+    # pypi-publish. Tag-only: the `if` skips this on workflow_dispatch, whose sole job
+    # is a docs-only Pages redeploy that must not drag the full test suite behind it.
+    name: test (publish gate · py3.12 · ubuntu-latest)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install CPU torch (runners have no CUDA)
+        # --extra-index-url (NOT --index-url): --index-url would REPLACE PyPI; keep it
+        # as resolver of last resort. (Gate leg is ubuntu, but stay consistent with ci.yml.)
+        run: pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Install flashruntime + test extras
+        run: pip install -e ".[sklearn,dev,service]"
+      - name: Run the suite (unit + e2e)
+        run: pytest
+
   pypi-publish:
     # Publish to PyPI via Trusted Publishing (OIDC) — NO API token in the repo.
     #
@@ -64,7 +89,7 @@ jobs:
     # publisher exists this step 403s (the build job above still succeeds and
     # the wheel is downloadable from the run's artifacts).
     name: pypi-publish (trusted publishing)
-    needs: build
+    needs: [build, test]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
@@ -75,7 +100,9 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # SHA-pinned (not the mutable @release/v1 branch): this job holds id-token: write,
+      # so pin the exact commit and let a human read the version from the trailing tag.
+      - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247  # v1.14.1
 
   docs-deploy:
     # Deploy the docs site to GitHub Pages. Runs on a `v*` tag (alongside the

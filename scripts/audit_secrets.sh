@@ -6,6 +6,10 @@
 # worktree for credential-shaped strings. Any hit exits 1 so CI or a release
 # can block on it.
 #
+# Coverage: exactly the set that travels on a push — every ref-reachable commit
+# (all branches + tags, via --all) plus the tracked worktree. It deliberately does
+# NOT scan dangling/unreachable blobs, the stash, reflog-only commits, or binary blob bytes.
+#
 # `.env` is where real secrets live locally (the RunPod API key). It MUST stay
 # untracked and gitignored: this script asserts that loudly and never reads its
 # contents. Because the worktree scan uses `git grep` (tracked files only, and
