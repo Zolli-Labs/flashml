@@ -57,8 +57,7 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
 - `flashml_workloads/sharded_kmeans.py` = the POC's Ray workload (deterministic
   shards, retriable tasks, honest recovery evidence).
 - `deploy/docker/` = kmeans + service images. `docs/adr/` = ACK Edge + PAI-DLC ADRs.
-- `engine/`, `algorithms/`, `adapters/`, `storage/` = pre-K8s prototype, kept
-  working; `scheduler/` remains the only scaffold package.
+- `scheduler/` remains the only scaffold package.
 - `planner/` + `protocol/plan_v1alpha1.py` = the strategy planner (July
   2026): `flash.plan(PlanRequest)` → explained `PlanReport`/`StrategyPlan`;
   CLI `flashruntime plan spec.yaml`. Deterministic, framework-import-free,
@@ -78,8 +77,8 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   over FailureClass × mode, correlated incidents freeze automation.
 - **Core is pydantic-only**: `import flashruntime` + planner/leases/
   checkpoint/recovery must never require numpy/k8s/minio/fastapi (verified
-  by a clean-venv smoke; prototype engine is lazy via PEP 562 `__getattr__`
-  and gated behind `[prototype]`). Keep it that way.
+  by a clean-venv smoke; the bring-your-own-code SDK helpers are lazy via
+  PEP 562 `__getattr__` so the core import stays minimal). Keep it that way.
 - `service/` Mode A surface (July 2026): LeaseManager over HTTP
   (`/v1alpha1/leases/claim`, `/attempts/{id}/{heartbeat,complete,fail}`),
   minimal node registry (`/nodes/*` — self-hosted profile; cloud fronts it

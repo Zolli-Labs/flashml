@@ -361,28 +361,25 @@ isolate it. That is the intended behavior: unsafe placement fails closed.
 
 ---
 
-## Built-in algorithms
+## Built-in task modules
 
-FlashRuntime also ships a handful of ready-made distributed algorithms
-(`flashruntime.algorithms` — sharded K-means, sklearn `partial_fit`) usable
-through the prototype `Cluster.train()` API:
+FlashRuntime ships a few ready-made **task modules** in `flashml_workloads/`
+that the Mode A coordinator expands a job into and leases out — worked
+examples of the reliability contract, no bring-your-own-code wiring required:
 
-```python
-import flashruntime
+- `sklearn_trial` — one scikit-learn fit/score trial; the unit a
+  `hyperparameter_search` job fans out into.
+- `kmeans_shard` + `kmeans_driver` — deterministic sharded K-means
+  (`sharded_kmeans`), retriable per shard with honest recovery evidence.
+- `sgd_trainer` — a checkpointable SGD loop with bit-identical resume from
+  the last valid checkpoint manifest.
 
-with flashruntime.Cluster(provider="local", workers=4) as cluster:
-    job = cluster.train(
-        algorithm=flashruntime.algorithms.KMeans(k=5, n_shards=4),
-        dataset=numpy_array,
-        max_iterations=20,
-    )
-    fitted = job.result()
-```
-
-These are **batteries-included examples**, not the required path — they exist
-to demonstrate the mechanics, and they live behind the `[prototype]` extra so
-they never weigh on the pure-Python core. The supported way to run your own
-work is always: bring your code and let FlashRuntime operate it.
+They install with the `[sklearn]` extra and run through the coordinator's
+job→task expansion (`execution.backend: leases`); the `e2e/` suite drives
+them through the kill-a-machine sweep and cross-machine resume demos. They
+demonstrate the mechanics — they are not the required path. The supported
+way to run your own work is always: bring your code and let FlashRuntime
+operate it.
 
 ---
 

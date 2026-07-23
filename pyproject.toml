@@ -12,14 +12,13 @@ requires-python = ">=3.10"
 # Core is deliberately tiny: the protocol, planner, leases, checkpoint
 # catalog, and recovery policy need nothing but pydantic. Everything
 # infrastructure-shaped (Ray/K8s backends, object stores, the HTTP service,
-# the numpy prototype engine) lives behind extras.
+# the sklearn task-module examples) lives behind extras.
 dependencies = [
     "pydantic>=2.7",
 ]
 
 [project.optional-dependencies]
-prototype = ["numpy>=1.26"]                       # engine/ + algorithms/ (pre-K8s prototype)
-sklearn = ["numpy>=1.26", "scikit-learn>=1.3"]
+sklearn = ["numpy>=1.26", "scikit-learn>=1.3"]   # flashml_workloads/ task-module examples
 k8s = ["kubernetes>=29"]
 artifacts = ["minio>=7.2"]
 oss = ["oss2>=2.18"]

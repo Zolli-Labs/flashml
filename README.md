@@ -23,16 +23,12 @@ FlashRuntime is one of three components in the FlashML system by
 Read [`docs/SYSTEM_OVERVIEW.md`](docs/SYSTEM_OVERVIEW.md) for the full
 product architecture, and [`AGENTS.md`](AGENTS.md) if you are an AI coding
 agent working in this repo. The strategy planner's code walkthrough lives
-in [`docs/planner/`](docs/planner/README.md); docs for the pre-K8s
-prototype engine are archived in
-[`docs/archive-prototype/`](docs/archive-prototype/README.md).
+in [`docs/planner/`](docs/planner/README.md).
 
 ## Status
 
-**Pre-release.** Two working generations coexist here:
+**Pre-release.** The current codebase is the July 2026 local milestone:
 
-- The original prototype (local multi-worker training library — see
-  Quickstart) that seeded the repo.
 - The July 2026 POC layer: the versioned `protocol/v1alpha1`, the KubeRay
   execution backend (JobSpec → ephemeral Ray cluster), the artifact store
   (MinIO/S3-compatible + Alibaba OSS), the FastAPI service + event ledger,
@@ -112,13 +108,6 @@ decision = decide(classify(FailureSignals(heartbeat_lost=True)),
 The FlashRuntime service exposes these same objects over HTTP; FlashNode's
 device executor is their remote client.
 
-## Quickstart 3 — prototype execution engine
-
-```bash
-uv pip install -e ".[sklearn,dev]"
-python examples/local_kmeans_and_linear_regression.py
-```
-
 ## Bring your own code
 
 FlashRuntime operates *your* training job — no rewrite. Run an existing
@@ -138,20 +127,6 @@ Integration tests live in [`tests/integration/`](tests/integration/README.md)
 and skip themselves (with instructions) when their environment is absent.
 The local kind + KubeRay + MinIO stack is owned by the workspace Makefile,
 not this repo — the library stays `pip install`-clean.
-
-```python
-import flashruntime
-
-with flashruntime.Cluster(provider="local", workers=4) as cluster:
-    job = cluster.train(
-        algorithm=flashruntime.algorithms.KMeans(k=5, n_shards=4),
-        dataset=numpy_array,
-        max_iterations=20,
-    )
-    for event in job.stream():
-        print(event.iteration, event.metrics)
-    fitted = job.result()
-```
 
 ## Package layout
 
@@ -181,8 +156,6 @@ flashruntime/
 │   │            #   SQLite ledger, dashboard at GET /
 ├── backends/    # [k8s] ExecutionBackend contract + KubeRay backend (Mode B)
 ├── artifacts/   # [artifacts]/[oss] MinIO/S3-compatible + Alibaba OSS stores
-├── engine/      # [prototype] pre-K8s local training engine
-├── algorithms/  #   ⤷ sharded K-means, sklearn partial_fit
 └── deploy/      # container image definitions (not part of the package)
 
 flashml_workloads/   # runnable task modules (pure stdlib/sklearn):

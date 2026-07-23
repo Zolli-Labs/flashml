@@ -28,7 +28,8 @@ A clean, pure-Python core (`pip install flashruntime` brings only pydantic):
 Infrastructure integrations are opt-in extras, never core imports:
 `[service]` FastAPI coordinator + CLI job commands · `[k8s]` KubeRay
 backend · `[artifacts]`/`[oss]` MinIO / Alibaba OSS stores ·
-`[prototype]`/`[sklearn]` the numpy-based local training engine.
+`[sklearn]` numpy + scikit-learn for the built-in task-module examples
+(`flashml_workloads/`).
 """
 
 from typing import Any
@@ -61,12 +62,6 @@ __all__ = [
     "IndependentTasks",
     "Resources",
     "Objective",
-    # prototype engine (lazy — needs the [prototype] extra)
-    "Cluster",
-    "Job",
-    "JobEvent",
-    "algorithms",
-    "registered_providers",
     # bring-your-own-code SDK (lazy — stdlib+pydantic only, but kept lazy
     # so `import flashruntime` stays minimal)
     "submit",
@@ -107,12 +102,8 @@ def run(plan: StrategyPlan, coordinator_url: str | None = None):
     )
 
 
-# The pre-K8s prototype engine needs numpy; keep it importable exactly as
-# before (flashruntime.Cluster, flashruntime.algorithms, ...) but resolve it
-# lazily (PEP 562) so the pydantic-only core never pays for it.
-_PROTOTYPE_EXPORTS = {"Cluster", "Job", "JobEvent", "algorithms", "registered_providers"}
-
-# SDK exports resolve lazily too: name -> (module, attribute).
+# SDK exports resolve lazily: name -> (module, attribute) so the pydantic-only
+# core stays minimal until a bring-your-own-code helper is actually used.
 _SDK_EXPORTS = {
     "submit": ("flashruntime.sdk", "submit"),
     "CommandWorkload": ("flashruntime.workloads.command", "CommandWorkload"),
@@ -123,29 +114,6 @@ _SDK_EXPORTS = {
 
 
 def __getattr__(name: str) -> Any:
-    if name in _PROTOTYPE_EXPORTS:
-        # importlib, not `from flashruntime import ...`: an attribute-style
-        # import would re-enter this __getattr__ and recurse.
-        import importlib
-
-        try:
-            algorithms_mod = importlib.import_module("flashruntime.algorithms")
-            adapters_mod = importlib.import_module("flashruntime.adapters")
-            engine_mod = importlib.import_module("flashruntime.engine")
-        except ImportError as exc:  # numpy missing
-            raise ImportError(
-                f"flashruntime.{name} is part of the prototype engine and needs "
-                'the optional dependencies: pip install "flashruntime[prototype]"'
-            ) from exc
-        exports = {
-            "Cluster": engine_mod.Cluster,
-            "Job": engine_mod.Job,
-            "JobEvent": engine_mod.JobEvent,
-            "algorithms": algorithms_mod,
-            "registered_providers": adapters_mod.registered_providers,
-        }
-        globals().update(exports)
-        return exports[name]
     if name in _SDK_EXPORTS:
         import importlib
 
