@@ -1,0 +1,9 @@
+# The docs-site navigation — DATA, not code (extensibility rule §2b).
+# Ordered mapping of  section title -> [page files, in order].
+# Adding a page is ONE line here plus one .md file in this directory;
+# scripts/build_docs.py needs no change. Files are named relative to
+# docs/site/; internal cross-links in the .md are authored as `*.md` and
+# rewritten to `*.html` at build time.
+Getting started:
+  - index.md
+  - get-started.md

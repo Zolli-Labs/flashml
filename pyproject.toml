@@ -35,6 +35,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "numpy>=1.26",
     "pyyaml>=6",
+    "markdown>=3.6",   # scripts/build_docs.py — dev-time site builder, NOT a runtime dep
 ]
 
 [project.scripts]
@@ -45,6 +46,11 @@ Homepage = "https://github.com/Zolli-Labs/flashruntime"
 
 [tool.setuptools.packages.find]
 include = ["flashruntime*", "flashml_workloads*"]
+
+[tool.setuptools.package-data]
+# Ship the built docs site so the packaged viewer can serve /docs offline.
+# (py.typed marker lands in T11; the glob is harmless until then.)
+flashruntime = ["py.typed", "viewer/_docs/**"]
 
 [tool.pytest.ini_options]
 # Unit tests run everywhere with zero infrastructure. Integration tests

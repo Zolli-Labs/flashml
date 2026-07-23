@@ -11,3 +11,8 @@ build/
 # examples write metrics.json into their own dir (cwd) when run; it is a
 # generated artifact the SDK copies out — never commit the stray original.
 examples/*/metrics.json
+# Built docs (scripts/build_docs.py) — generated from docs/site/, never committed.
+# The viewer serves the first at /docs; the second deploys to GitHub Pages.
+# Leading slash anchors /site to the repo root — do NOT ignore docs/site/ (source).
+/site/
+flashruntime/viewer/_docs/
