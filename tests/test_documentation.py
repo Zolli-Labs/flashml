@@ -191,7 +191,9 @@ def test_docs_site_linkcheck_catches_bad_nested_link(tmp_path):
 
 def test_docs_site_python_blocks_compile():
     builder = _load_builder()
-    for md in sorted(builder.SRC.glob("*.md")):
+    # rglob so nested pages (tutorials/, guides/, concepts/, reference/) are
+    # covered too — every ```python block on the site must be syntactically true.
+    for md in sorted(builder.SRC.rglob("*.md")):
         text = md.read_text(encoding="utf-8")
         for i, block in enumerate(PYTHON_FENCE.findall(text)):
             # compile (not exec): docs must be syntactically true, not run here.

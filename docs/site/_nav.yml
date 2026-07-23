@@ -7,3 +7,19 @@
 Getting started:
   - index.md
   - get-started.md
+Tutorials:
+  - tutorials/convnet.md
+  - tutorials/sklearn-sweeps.md
+  - tutorials/fault-tolerance.md
+Guides:
+  - guides/pytorch.md
+  - guides/sklearn.md
+  - guides/huggingface.md
+  - guides/jobspec-and-isolation.md
+Concepts:
+  - concepts/architecture.md
+Reference:
+  - reference/sdk.md
+  - reference/integrations.md
+  - reference/torch-helper.md
+  - reference/cli.md
