@@ -68,6 +68,25 @@ def write_manifest(
     return manifest
 
 
+def verify_manifest(manifest: CheckpointManifest, step_dir: Path) -> bool:
+    """True iff every part named in `manifest` is present in `step_dir` and
+    re-hashes to its recorded sha256 — i.e. this checkpoint is safe to
+    restore. The single source of truth for that question: both
+    `latest_valid_manifest` (recovery's picker) and the viewer's per-step
+    listing call it, so the part-hashing lives in exactly one place and can
+    never drift between the two. Never raises: a part we cannot re-hash
+    (directory, unreadable, gone) means the manifest cannot be verified, so
+    it is simply invalid."""
+    step_dir = Path(step_dir)
+    try:
+        return all(
+            (step_dir / part.key).is_file() and _sha256(step_dir / part.key) == part.sha256
+            for part in manifest.parts
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def latest_valid_manifest(ckpt_root: Path, pattern: str = "step-*") -> CheckpointManifest | None:
     """Newest manifest whose parts all re-verify on disk, or None.
 
@@ -85,16 +104,6 @@ def latest_valid_manifest(ckpt_root: Path, pattern: str = "step-*") -> Checkpoin
             # unreadable/invalid manifest (bad JSON, or manifest.json is a
             # directory / unreadable file → OSError): treat as nonexistent
             continue
-        step_dir = mf_path.parent
-        try:
-            intact = all(
-                (step_dir / part.key).is_file() and _sha256(step_dir / part.key) == part.sha256
-                for part in manifest.parts
-            )
-        except (OSError, ValueError):
-            # a part we cannot re-hash (directory, unreadable, gone): the
-            # manifest cannot be verified ⇒ treat it as invalid, keep scanning
-            continue
-        if intact and (best is None or manifest.step > best.step):
+        if verify_manifest(manifest, mf_path.parent) and (best is None or manifest.step > best.step):
             best = manifest
     return best
