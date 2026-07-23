@@ -57,6 +57,12 @@ def main() -> None:
 
     model, optimizer, loader = ft.prepare(model, optimizer, loader)
     start = ft.start_step()
+    # ft.prepare put the model on ft.device() ("cpu" or this rank's "cuda:N");
+    # ordinary PyTorch then owns moving each batch to the SAME device. On CPU
+    # this is a no-op, so the CPU path is byte-for-byte unchanged; on a GPU box
+    # it is what makes the run actually train on CUDA instead of crashing with a
+    # cpu-vs-cuda device mismatch (caught by tests/test_gpu_e2e.py on real GPUs).
+    device = ft.device()
 
     step = start
     loss = torch.tensor(0.0)
@@ -64,6 +70,7 @@ def main() -> None:
         for x, y in loader:
             if step >= args.steps:
                 break
+            x, y = x.to(device), y.to(device)
             loss = torch.nn.functional.cross_entropy(model(x), y)
             optimizer.zero_grad()
             loss.backward()
@@ -80,6 +87,13 @@ def main() -> None:
             "steps": step,
             "resumed_from": start,
             "final_loss": round(loss.item(), 6),
+            # where/how this rank actually trained — "cpu"/"cuda:0" and the
+            # torch.distributed backend ("gloo" on CPU, "nccl" on GPU, None
+            # single-process). Lets a GPU run PROVE the CUDA/nccl path that a
+            # CPU box can't (tests/test_gpu_e2e.py). Additive: CPU e2e ignores
+            # these keys.
+            "device": ft.device(),
+            "backend": ft.backend(),
         }
         with open("metrics.json", "w") as f:
             json.dump(metrics, f)

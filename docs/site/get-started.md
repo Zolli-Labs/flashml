@@ -96,6 +96,12 @@ definition.
 > resumes bit-identically. It is optional sugar on the same launch-only
 > contract, never required.
 
+The same `flashruntime.torch` path runs unchanged on GPUs — `ft.prepare`
+places each rank's model on its `cuda:N`, initializes the `nccl` backend, and
+restores checkpoints across the CUDA↔CPU boundary. **Validated on real GPUs
+(2×RTX 4090, nccl) — 2026-07-23** (torch 2.7.1+cu128, CUDA 12.8), covering the
+2-process nccl DDP run and a GPU kill-and-resume; see `tests/test_gpu_e2e.py`.
+
 ## Watch it run
 
 Pass `watch=True` (or just run at an interactive terminal, where it is the

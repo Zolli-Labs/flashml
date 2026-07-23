@@ -35,9 +35,16 @@ __all__ = [
     "world_size",
     "is_main",
     "start_step",
+    "device",
+    "backend",
 ]
 
 _restored_step = 0
+# Set by prepare() from launch facts so a script can REPORT what it ran on
+# (device string + torch.distributed backend) without re-deriving it. Both
+# stay at their launched-single-process defaults until prepare() runs.
+_device = "cpu"
+_backend: str | None = None
 
 
 def _resolve_device(world_size: int, cuda_available: bool, local_rank: int) -> str:
@@ -74,6 +81,20 @@ def start_step() -> int:
     return _restored_step
 
 
+def device() -> str:
+    """The device the last ``prepare()`` placed this rank's model on —
+    ``"cpu"`` or ``f"cuda:{local_rank}"``. Lets a script report where it
+    trained (e.g. into ``metrics.json``) without re-deriving the choice."""
+    return _device
+
+
+def backend() -> str | None:
+    """The ``torch.distributed`` backend the last ``prepare()`` initialized
+    (``"nccl"`` on GPU, ``"gloo"`` on CPU), or ``None`` when launched
+    single-process (no process group)."""
+    return _backend
+
+
 def _output_dir() -> Path:
     return Path(os.environ.get("FLASHML_OUTPUT_DIR", "."))
 
@@ -89,12 +110,13 @@ def prepare(model, optimizer=None, dataloader=None):
     """Wire distributed execution (when launched distributed) and restore
     the newest valid checkpoint (when one exists). Returns the possibly
     wrapped/rebuilt (model, optimizer, dataloader) triple."""
-    global _restored_step
+    global _restored_step, _device, _backend
     import torch
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     device = _resolve_device(world_size(), torch.cuda.is_available(), local_rank)
     on_cuda = device != "cpu"
+    _device = device  # remember for device()/metrics reporting
 
     if on_cuda:
         # place the model on this rank's GPU BEFORE the DDP wrap (and for a
@@ -106,9 +128,9 @@ def prepare(model, optimizer=None, dataloader=None):
     if world_size() > 1:
         import torch.distributed as dist
 
+        _backend = "nccl" if torch.cuda.is_available() else "gloo"
         if not dist.is_initialized():
-            backend = "nccl" if torch.cuda.is_available() else "gloo"
-            dist.init_process_group(backend=backend)
+            dist.init_process_group(backend=_backend)
         if on_cuda:
             # bind DDP to the device; gloo/CPU must keep the no-args wrap.
             model = torch.nn.parallel.DistributedDataParallel(

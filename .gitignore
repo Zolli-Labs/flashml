@@ -15,6 +15,10 @@ examples/*/metrics.json
 # the committed baseline-<host>.json is tracked — the docs render it at build time.
 /benchmarks/results/*.json
 !/benchmarks/results/baseline-*.json
+# RunPod real-GPU validation artifacts (scripts/runpod_gpu_e2e.py): captured
+# pytest/bench output, pod JSON, and the per-run EPHEMERAL ssh keypair — scratch,
+# never committed.
+/scripts/runpod_results/
 # Built docs (scripts/build_docs.py) — generated from docs/site/, never committed.
 # The viewer serves the first at /docs; the second deploys to GitHub Pages.
 # Leading slash anchors /site to the repo root — do NOT ignore docs/site/ (source).

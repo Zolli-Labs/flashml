@@ -74,11 +74,15 @@ DDP/FSDP2/torchrun, Ray, Hugging Face).
 
 ### Notes
 
-- **GPU validation is pending.** The CUDA code paths (nccl DDP, device
-  placement, GPU kill-and-resume) are implemented and unit-tested on CPU via a
-  pure device-selection helper, but end-to-end validation on real GPUs is not
-  yet complete. This note will be updated with the validated hardware, torch/
-  CUDA versions, and date once that run lands.
+- **GPU validation: done (2026-07-23).** The CUDA code paths — nccl DDP,
+  per-rank device placement, and GPU kill-and-resume — are validated end-to-end
+  on real hardware: **2×NVIDIA GeForce RTX 4090** (RunPod community cloud),
+  torch 2.7.1+cu128, CUDA 12.8. `tests/test_gpu_e2e.py` asserts a 2-process
+  nccl run completes (backend reported `nccl`, model on `cuda:0`) and that a
+  crash at step 40 resumes from the last valid checkpoint onto the uninterrupted
+  loss. The run surfaced and fixed a real GPU-only bug the CPU/gloo suite could
+  not: batches must be moved to `ft.device()` (model was placed on CUDA, data
+  was not). Harness: `scripts/runpod_gpu_e2e.py` (dry-runnable via `--plan-only`).
 - **Cloud is out of scope here.** FlashRuntime is useful and complete without
   the cloud; the managed control plane is a separate, private component.
 
