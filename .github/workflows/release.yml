@@ -1,0 +1,108 @@
+name: release
+
+# Cut a release by pushing a version tag:  git tag v0.1.0 && git push --tags
+#
+#   build         — docs-first, then sdist + wheel; assert the wheel ships docs
+#   pypi-publish  — Trusted Publishing (OIDC), no token stored in the repo
+#   docs-deploy   — publish the docs site to GitHub Pages
+#
+# `workflow_dispatch` runs docs-deploy ONLY (a pages-only redeploy with no
+# release): build + pypi-publish are gated on a `v*` tag ref and skip.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# Never cancel an in-flight release: a publish must finish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Docs are built BEFORE the wheel on purpose: a fresh checkout has no
+    # flashruntime/viewer/_docs/, so `python -m build` would happily produce a
+    # wheel that silently ships docs-LESS. build_docs.py writes _docs/ first;
+    # then we build and ASSERT the wheel actually contains the docs index.
+    name: build (docs-first sdist + wheel)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build + docs deps
+        run: pip install build && pip install -e ".[dev]"
+      - name: Build the docs into flashruntime/viewer/_docs/ FIRST
+        run: python scripts/build_docs.py
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Assert the wheel actually contains the built docs
+        run: |
+          if ! unzip -l dist/*.whl | grep -q 'flashruntime/viewer/_docs/index.html'; then
+            echo "::error::wheel is missing viewer/_docs/index.html — docs were not built before the wheel"
+            unzip -l dist/*.whl
+            exit 1
+          fi
+          echo "OK: wheel contains flashruntime/viewer/_docs/index.html"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi-publish:
+    # Publish to PyPI via Trusted Publishing (OIDC) — NO API token in the repo.
+    #
+    # ONE-TIME SETUP (the maintainer does this once on PyPI, before the first
+    # tag): https://pypi.org/manage/account/publishing/ → add a pending
+    # publisher for project `flashruntime`, owner `Zolli-Labs`, repo
+    # `flashruntime`, workflow `release.yml`, environment `pypi`. Until that
+    # publisher exists this step 403s (the build job above still succeeds and
+    # the wheel is downloadable from the run's artifacts).
+    name: pypi-publish (trusted publishing)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # mint the short-lived OIDC token PyPI verifies
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  docs-deploy:
+    # Deploy the docs site to GitHub Pages. Runs on a `v*` tag (alongside the
+    # release) AND on manual workflow_dispatch (pages-only redeploy). The site
+    # goes live at https://zolli-labs.github.io/flashruntime/ on the first
+    # successful deploy after Pages is enabled for the repo (Settings → Pages →
+    # Source: GitHub Actions).
+    name: docs-deploy (GitHub Pages)
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write      # publish to Pages
+      id-token: write   # OIDC token deploy-pages verifies
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install docs build deps
+        run: pip install -e ".[dev]"
+      - name: Build the Pages site (writes site/)
+        run: python scripts/build_docs.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+      - id: deploy
+        uses: actions/deploy-pages@v4

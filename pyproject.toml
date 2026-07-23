@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
+# setuptools>=77 accepts the PEP 639 SPDX `license` string form used below.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,8 +8,40 @@ name = "flashruntime"
 version = "0.1.0"
 description = "Open fault-tolerant distributed ML runtime: strategy planning, job protocol, leases, checkpointing, and recovery across heterogeneous compute."
 readme = "README.md"
-license = { text = "Apache-2.0" }
+# PEP 639 SPDX expression (string form) — replaces the deprecated
+# `license = { text = ... }` table that setuptools now warns on. LICENSE ships
+# in the wheel metadata via license-files.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [{ name = "Zolli Labs" }]
+keywords = [
+    "machine-learning",
+    "distributed-training",
+    "fault-tolerance",
+    "checkpointing",
+    "pytorch",
+    "ray",
+    "mlops",
+    "reliability",
+    "hyperparameter-search",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    # License is declared via the SPDX `license` expression above (PEP 639);
+    # the legacy "License ::" classifier is disallowed alongside it.
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
 # Core is deliberately tiny: the protocol, planner, leases, checkpoint
 # catalog, and recovery policy need nothing but pydantic. Everything
 # infrastructure-shaped (Ray/K8s backends, object stores, the HTTP service,
@@ -43,13 +76,21 @@ flashruntime = "flashruntime.service.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Zolli-Labs/flashruntime"
+# Docs site goes live on the first GitHub Pages deploy (release.yml docs-deploy).
+Documentation = "https://zolli-labs.github.io/flashruntime/"
+Repository = "https://github.com/Zolli-Labs/flashruntime"
+Issues = "https://github.com/Zolli-Labs/flashruntime/issues"
+Changelog = "https://github.com/Zolli-Labs/flashruntime/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["flashruntime*", "flashml_workloads*"]
 
 [tool.setuptools.package-data]
-# Ship the built docs site so the packaged viewer can serve /docs offline.
-# (py.typed marker lands in T11; the glob is harmless until then.)
+# py.typed marks the package PEP 561-typed (ships inline type info to users).
+# viewer/_docs/** is the built docs site so the packaged viewer can serve /docs
+# offline — build it (scripts/build_docs.py) BEFORE `python -m build`, or the
+# wheel builds fine but ships docs-less (the release workflow does this in order
+# and asserts the wheel contains viewer/_docs/index.html).
 flashruntime = ["py.typed", "viewer/_docs/**"]
 
 [tool.pytest.ini_options]

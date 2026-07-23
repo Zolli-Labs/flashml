@@ -1,0 +1,121 @@
+name: ci
+
+# Runs on every push and PR. Four jobs, each guarding one promise:
+#   core-smoke  — `import flashruntime` stays pydantic-only (no heavy deps)
+#   test        — the full unit + e2e suite, every interpreter, both OSes
+#   docs        — the docs site builds and every internal link resolves
+#   bench-smoke — the benchmark scenarios RUN (guards the harness, not numbers)
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# One run per ref: a new push to the same branch/PR cancels the previous,
+# still-running one. Saves CI minutes; the newest commit is the one that matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  core-smoke:
+    # The core promise (AGENTS.md rule #core): `import flashruntime` and the
+    # planner / leases / checkpoint / recovery / viewer subpackages must work
+    # with NOTHING but pydantic — never numpy, torch, k8s, minio, fastapi.
+    # Install the bare package (no extras) and assert none of those leaked in.
+    name: core-smoke (pydantic-only import)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install core only (no extras)
+        run: pip install .
+      - name: Assert the core import stays pydantic-only
+        run: |
+          python - <<'PY'
+          import sys
+          import flashruntime             # noqa: F401
+          import flashruntime.viewer      # noqa: F401  (viewer is core: pure-python page/state)
+          import flashruntime.planner     # noqa: F401
+          import flashruntime.leases      # noqa: F401
+          import flashruntime.checkpoint  # noqa: F401
+          import flashruntime.recovery    # noqa: F401
+          leaked = [m for m in ("numpy", "torch", "kubernetes", "minio", "fastapi")
+                    if m in sys.modules]
+          assert not leaked, f"heavy deps leaked into the core import: {leaked}"
+          print("core import is pydantic-only OK")
+          PY
+
+  test:
+    # The full unit + e2e suite across every supported interpreter and both
+    # OSes. CPU torch + sklearn + service extras let the e2e examples (DDP on
+    # CPU via torchrun, the sklearn sweep that spawns a bare `python`) run for
+    # real instead of skipping. `pytest` deselects integration + bench_smoke by
+    # default (see pyproject addopts), so this is the unit + e2e tier.
+    name: test (py${{ matrix.python-version }} · ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install CPU torch (runners have no CUDA)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install flashruntime + test extras
+        run: pip install -e ".[sklearn,dev,service]"
+      - name: Run the suite (unit + e2e)
+        # setup-python puts `python` and torch's `torchrun` console script on
+        # PATH, so the e2e sklearn sweep (which spawns a bare `python`) and the
+        # DDP examples resolve their interpreters. Do NOT override PATH here.
+        run: pytest
+
+  docs:
+    # The docs site must build and every internal link + nav entry must
+    # resolve. --check builds to a temp dir, writes nothing, and exits 1 with a
+    # listing on any broken link. Needs only the dev extra (markdown + pyyaml).
+    name: docs (build + link check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install docs build deps
+        run: pip install -e ".[dev]"
+      - name: Build + verify the docs site
+        run: python scripts/build_docs.py --check
+
+  bench-smoke:
+    # Prove the benchmark scenarios RUN (1 repeat, explicitly non-
+    # representative). This guards the measurement HARNESS — never a number. The
+    # bench_smoke-marked unit tests assert a scenario executes at 1 repeat;
+    # `benchmarks run --smoke` drives the CLI end to end. Needs CPU torch +
+    # sklearn so the torch/sklearn scenarios execute instead of skipping.
+    name: bench-smoke (scenarios run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install CPU torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install flashruntime + bench-relevant extras
+        run: pip install -e ".[sklearn,dev,service]"
+      - name: Bench-marked unit tests
+        run: pytest -m bench_smoke
+      - name: Smoke-run every scenario (1 repeat, non-representative)
+        run: python -m benchmarks run --all --repeats 1 --smoke
