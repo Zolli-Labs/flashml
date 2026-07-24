@@ -148,7 +148,7 @@ faked. A measured baseline is committed under
 | Checkpoint cost | **−1.2 ms / checkpoint** (p90 6.2 ms) | A few-KB state dict; the median delta is *below* the run-to-run noise floor at this size (it goes slightly negative), so checkpoints are effectively free here — the p90 bounds it. A larger model surfaces a real positive cost. |
 | Auto-resume | **40 steps not recomputed** | The size-*independent* guarantee: resume never re-does work past the last valid checkpoint. |
 | Adoption | **7 lines** | To make a vanilla script framework-ready (difflib vs each project's own docs). |
-| Resilience | **5/5 faults handled · 20/20 integrity under `kill -9`** | Every fault type routed to the right typed recovery; a checkpoint survives a mid-write `SIGKILL` on 20/20 kills (naive `torch.save`: 20/20 corrupted). 16-trial storm, half crash-armed: 16/16 completed, all 8 crashed trials auto-resumed, 0 manual. Dead-worker MTTD **3.0 s**, MTTR **~3.5 ms**. |
+| Resilience | **5/5 faults handled · 20/20 integrity under `kill -9`** | Every fault type routed to the right typed recovery; a checkpoint survives a mid-write `SIGKILL` on 20/20 kills (naive `torch.save`: 20/20 corrupted). 16-trial storm, half crash-armed: 16/16 completed, all 8 crashed trials auto-resumed, 0 manual. Dead-worker MTTD **3.05 s**, MTTR **~3.5 ms**. |
 
 The *timing* rows are smoke-scale on one host: the models are tiny, so the
 *wall-clock* saved by recovery is at the noise floor here. The figure that
