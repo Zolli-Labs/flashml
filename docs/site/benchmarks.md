@@ -26,8 +26,8 @@ sequential baseline. **Resilience** measures the fault-tolerance guarantees
 themselves, under real failure injection rather than modelling:
 
 - **Correct classification** — `fault_recovery_matrix` runs five distinct fault
-  types (import error, mid-run `SystemExit`, a hang killed by an external
-  `SIGKILL`, a `SIGKILL` inside the checkpoint-write window, and a corrupted
+  types (import error, mid-run `SystemExit`, a worker killed mid-run by an
+  external `SIGKILL`, a `SIGKILL` inside the checkpoint-write window, and a corrupted
   newest part) and *counts* — from terminal run state, never asserts — how many
   the typed recovery taxonomy routes to the right action.
 - **Integrity under `kill -9`** — `checkpoint_integrity` fires repeated

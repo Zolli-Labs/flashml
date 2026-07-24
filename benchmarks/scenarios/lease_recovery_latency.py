@@ -294,6 +294,10 @@ def _measure(n: int) -> ResultRow:
             FLASHML_LEDGER_PATH=str(tmp / "ledger.db"),
             FLASHML_LOCAL_ARTIFACTS_DIR=str(tmp / "artifacts"),
             FLASHML_PROFILE="local",
+            # Force OPEN registration: an ambient FLASHML_JOIN_CODE inherited from
+            # the parent shell would gate /nodes/register and 403 this scenario,
+            # whose _register() supplies no join code. "" ⇒ None ⇒ open.
+            FLASHML_JOIN_CODE="",
             # The uvicorn target `flashruntime.service.app:app` is `None` unless
             # AUTOINIT is on. bench_env inherits os.environ, and the test suite's
             # conftest sets AUTOINIT=0 (its own apps are built in-process) — so we

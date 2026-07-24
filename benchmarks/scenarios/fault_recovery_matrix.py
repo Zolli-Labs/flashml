@@ -2,8 +2,9 @@
 across a spread of failure modes, or only on the one crash we rehearsed?
 
 HYPOTHESIS: flashruntime handles a diverse fault matrix — a deterministic bug,
-a mid-run crash, a hang, a kill inside the checkpoint write window, and a
-corrupt checkpoint — CORRECTLY and without a human: fail-fast on the bug,
+a mid-run crash, a worker killed mid-run by an external SIGKILL, a kill inside
+the checkpoint write window, and a corrupt checkpoint — CORRECTLY and without a
+human: fail-fast on the bug,
 auto-resume from the newest VALID checkpoint on the rest. A bare torchrun does
 none of it (every fault needs a person).
 
@@ -36,7 +37,7 @@ from benchmarks.schema import ResultRow
 from flashruntime.checkpoint.local import latest_valid_manifest
 
 name = "fault_recovery_matrix"
-hypothesis = "Automated recovery does the right typed thing across a fault matrix — fail-fast on a deterministic bug, resume from the newest valid checkpoint on transient crashes/hangs/mid-write kills/corruption — with zero human interventions where a bare torchrun needs one per fault."
+hypothesis = "Automated recovery does the right typed thing across a fault matrix — fail-fast on a deterministic bug, resume from the newest valid checkpoint on transient crashes/mid-run kills/mid-write kills/corruption — with zero human interventions where a bare torchrun needs one per fault."
 
 STEPS, EVERY = 8, 2
 
@@ -87,11 +88,14 @@ def _case_hang(tmp: Path):
     ck = _ckpt(tmp / "run")
     t0 = time.perf_counter()
     run = flash.submit(_wl(tmp, script), output_dir=tmp / "run", max_restarts=1, wait=False)
+    # The SIGKILL fires the instant the FIRST manifest exists (~step 2), which is
+    # BEFORE the hang trigger — so this measures a worker killed MID-RUN by an
+    # external SIGKILL, not a detected-and-killed hang. Labelled accordingly.
     fired = faults.kill_child(run, when=lambda: any(ck.glob("step-*/manifest.json")), timeout_s=30)
     run.wait(timeout=90)
     t, r = time.perf_counter() - t0, _resumed(run)
     ok = fired and run.state.value == "SUCCEEDED" and bool(r)
-    return ok, f"(c) hang+external SIGKILL → resume {_m(ok)} (fired={fired}, resumed_from={r})", t, r
+    return ok, f"(c) mid-run external SIGKILL → resume {_m(ok)} (fired={fired}, resumed_from={r})", t, r
 
 
 def _case_write_window(tmp: Path):
@@ -214,7 +218,16 @@ def run(repeats: int) -> ResultRow:
         "mean_steps_preserved": round(sum(preserved) / len(preserved), 1) if preserved else 0.0,
     }
     if modelled:
-        comparators["torchrun_recovery_modelled_s"] = round(sum(modelled) / len(modelled), 3)
+        mean_modelled = sum(modelled) / len(modelled)
+        comparators["torchrun_recovery_modelled_s"] = round(mean_modelled, 3)
+        # tr_note is otherwise the LAST repeat's per-run figure, which disagrees
+        # with the mean comparator above — one row must not carry two values for
+        # one quantity, so report the MEAN here too (labelled "mean of N").
+        tr_note = (
+            f"torchrun comparator (case b, bare torchrun argv, nproc=1): crash run exits nonzero "
+            f"with NO retry; recovery modelled as t_crash+t_full={mean_modelled:.2f}s "
+            f"(mean of {len(modelled)}; no checkpoint ⇒ rerun from zero) — labelled modelled, house convention"
+        )
     notes = verdicts + [
         "correctness is COUNTED from run state (terminal state, attempts count, trials[0].resumed_from), never asserted",
         "manual_interventions_flash = cases the automation did NOT resolve correctly; torchrun modelled at 5 (no "

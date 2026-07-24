@@ -16,13 +16,13 @@
       "median": 7.0,
       "p10": 7.0,
       "p90": 7.0,
-      "repeats": 5,
+      "repeats": 20,
       "section": "performance",
       "comparators": {
         "accelerate_adopt_loc": 8.0,
         "flashruntime_core_deps": 1.0,
-        "flashruntime_import_ms": 78.7,
-        "torch_import_ms": 518.0
+        "flashruntime_import_ms": 74.9,
+        "torch_import_ms": 691.9
       },
       "notes": [
         "adoption LOC = inserted/changed non-blank lines from a vanilla script to its framework-ready form (difflib); snippets are cited from each project's own docs",
@@ -37,22 +37,22 @@
       "median": 1.0,
       "p10": 1.0,
       "p90": 1.0,
-      "repeats": 5,
+      "repeats": 20,
       "section": "resilience",
       "comparators": {
-        "iterations": 5.0,
-        "torn_writes_hit": 5.0,
+        "iterations": 20.0,
+        "torn_writes_hit": 20.0,
         "window_missed": 0.0,
         "naive_torch_save_failure_rate": 1.0,
-        "naive_torn_writes_hit": 5.0
+        "naive_torn_writes_hit": 20.0
       },
       "notes": [
         "integrity is COUNTED from run state (terminal SUCCEEDED + a hash-verified latest manifest still present + a resume from a verified earlier step>0), never asserted \u2014 a mishandled in-window kill lowers the rate as a FINDING, not a test to fix",
-        "integrity_rate = survived_hits / torn_writes_hit \u2014 the denominator is IN-WINDOW KILLS ONLY (5/5 iterations); window-missed iterations (0/5 \u2014 a clean uninterrupted run whose kill never landed) are EXCLUDED entirely, never counted as trivial 1.0 successes that would inflate the rate",
+        "integrity_rate = survived_hits / torn_writes_hit \u2014 the denominator is IN-WINDOW KILLS ONLY (20/20 iterations); window-missed iterations (0/20 \u2014 a clean uninterrupted run whose kill never landed) are EXCLUDED entirely, never counted as trivial 1.0 successes that would inflate the rate",
         "honesty: the write window is open a LARGE fraction of each step BY DESIGN (checkpoint_every=1, an 8 MB part per step widens the part-on-disk/manifest-absent gap), so hitting it is near-guaranteed \u2014 the claim is that flash SURVIVED every hit, NOT that hitting the window was hard",
         "honesty: torn_writes_hit certifies a kill during the manifest-absent COMMIT window (which includes the part-complete/manifest-pending sub-case), not necessarily a byte-torn part file \u2014 the guarantee under test is that a manifest-less step is never restored, however far its parts got",
         "mean resume step across torn-write hits: 1.0 (a verified EARLIER checkpoint, never the torn one)",
-        "naive comparator: torch.save(state, 'latest.pt') overwritten in place each step, killed mid-write, then torch.load \u2014 raised on 5/5 iterations (mid-write kills landed on 5/5); observed failure modes, verbatim exception classes: EOFError\u00d75"
+        "naive comparator: torch.save(state, 'latest.pt') overwritten in place each step, killed mid-write, then torch.load \u2014 raised on 20/20 iterations (mid-write kills landed on 20/20); observed failure modes, verbatim exception classes: EOFError\u00d720"
       ]
     },
     {
@@ -61,12 +61,12 @@
       "median": 16.0,
       "p10": 16.0,
       "p90": 16.0,
-      "repeats": 5,
+      "repeats": 20,
       "section": "resilience",
       "comparators": {
         "goodput_lower_bound": 0.8,
         "recompute_fraction": 0.0,
-        "wallclock_penalty_fraction": 0.222,
+        "wallclock_penalty_fraction": 0.243,
         "manual_interventions": 0.0,
         "crashed_first_attempt": 8.0
       },
@@ -81,16 +81,16 @@
     {
       "scenario": "fanout_throughput",
       "unit": "tasks/min",
-      "median": 110.1,
-      "p10": 110.1,
-      "p90": 110.1,
+      "median": 110.6,
+      "p10": 110.6,
+      "p90": 110.6,
       "repeats": 16,
       "section": "performance",
       "comparators": {
-        "sequential_tasks_min": 109.9,
-        "overhead_frac_05s": 0.083,
-        "overhead_frac_2s": 0.017,
-        "overhead_frac_5s": 0.009
+        "sequential_tasks_min": 110.0,
+        "overhead_frac_05s": 0.078,
+        "overhead_frac_2s": 0.022,
+        "overhead_frac_5s": 0.008
       },
       "notes": [
         "throughput = tasks / wall \u00d7 60, MEASURED over a single 16-task 0.5 s fan-out (p10==p90==median \u2014 one sweep, no repeat spread; the brief runs the full scenario once)",
@@ -105,36 +105,36 @@
       "median": 5.0,
       "p10": 5.0,
       "p90": 5.0,
-      "repeats": 5,
+      "repeats": 20,
       "section": "resilience",
       "comparators": {
         "manual_interventions_flash": 0.0,
         "manual_interventions_torchrun_modelled": 5.0,
-        "mean_recovery_s": 0.269,
-        "mean_steps_preserved": 3.2,
+        "mean_recovery_s": 0.256,
+        "mean_steps_preserved": 3.3,
         "torchrun_recovery_modelled_s": 1.872
       },
       "notes": [
         "(a) import_error \u2192 FAIL_JOB fast-stop \u2713 (1 attempt, 0 restarts burned)",
         "(b) systemexit_mid \u2192 auto-resume \u2713 (resumed_from=4, 2 attempts)",
-        "(c) hang+external SIGKILL \u2192 resume \u2713 (fired=True, resumed_from=2)",
+        "(c) mid-run external SIGKILL \u2192 resume \u2713 (fired=True, resumed_from=2)",
         "(d) mid-write SIGKILL \u2192 resume from verified earlier step \u2713 (fired=True, resumed_from=1)",
         "(e) corrupt newest part \u2192 resume from earlier valid \u2713 (corrupt@8, resumed_from=6)",
         "correctness is COUNTED from run state (terminal state, attempts count, trials[0].resumed_from), never asserted",
         "manual_interventions_flash = cases the automation did NOT resolve correctly; torchrun modelled at 5 (no typed classification, no auto-resume \u2014 every fault needs a human to notice and resubmit)",
-        "torchrun comparator (case b, bare torchrun argv, nproc=1): crash run exits 1 with NO retry; recovery modelled as t_crash+t_full=1.74s (no checkpoint \u21d2 rerun from zero) \u2014 labelled modelled, house convention"
+        "torchrun comparator (case b, bare torchrun argv, nproc=1): crash run exits nonzero with NO retry; recovery modelled as t_crash+t_full=1.87s (mean of 20; no checkpoint \u21d2 rerun from zero) \u2014 labelled modelled, house convention"
       ]
     },
     {
       "scenario": "hpo_sweep",
       "unit": "seconds",
-      "median": 5.622,
-      "p10": 5.612,
-      "p90": 5.703,
-      "repeats": 5,
+      "median": 6.117,
+      "p10": 5.978,
+      "p90": 6.257,
+      "repeats": 20,
       "section": "performance",
       "comparators": {
-        "sequential_s": 5.606,
+        "sequential_s": 5.984,
         "peak_child_rss_mb": 203.1,
         "flash_setup_loc": 10.0,
         "sequential_setup_loc": 16.0,
@@ -149,14 +149,14 @@
     {
       "scenario": "launch_overhead",
       "unit": "seconds",
-      "median": 0.1645,
-      "p10": -0.1192,
-      "p90": 0.3063,
-      "repeats": 5,
+      "median": 0.0443,
+      "p10": -0.2025,
+      "p90": 0.2399,
+      "repeats": 20,
       "section": "performance",
       "comparators": {
-        "flash_submit_s": 2.1247,
-        "bare_torchrun_s": 1.9602
+        "flash_submit_s": 2.53,
+        "bare_torchrun_s": 2.4578
       },
       "notes": [
         "overhead = flash.submit wall-clock minus identical bare torchrun, paired per repeat",
@@ -166,18 +166,18 @@
     {
       "scenario": "lease_recovery_latency",
       "unit": "s (MTTR)",
-      "median": 0.0032,
-      "p10": 0.0032,
-      "p90": 0.0032,
-      "repeats": 5,
+      "median": 0.0035,
+      "p10": 0.0035,
+      "p90": 0.0035,
+      "repeats": 20,
       "section": "resilience",
       "comparators": {
-        "claim_rt_p50_ms": 1.27,
-        "claim_rt_p95_ms": 1.975,
-        "hb_rt_p50_ms": 1.036,
-        "mttd_s": 3.0169,
+        "claim_rt_p50_ms": 1.246,
+        "claim_rt_p95_ms": 1.68,
+        "hb_rt_p50_ms": 1.18,
+        "mttd_s": 3.0506,
         "mttd_bound_s": 5.0,
-        "roundtrips": 5.0
+        "roundtrips": 20.0
       },
       "notes": [
         "measured against the REAL coordinator (flashruntime.service.app:app in a uvicorn SUBPROCESS on a free loopback port) over real HTTP \u2014 TestClient is in-process ASGI and would collapse the round-trip we measure, so it cannot back a latency claim",
@@ -191,15 +191,15 @@
     {
       "scenario": "loop_overhead",
       "unit": "ms/checkpoint",
-      "median": -0.035,
-      "p10": -3.094,
-      "p90": 14.624,
-      "repeats": 5,
+      "median": -1.248,
+      "p10": -13.736,
+      "p90": 6.186,
+      "repeats": 20,
       "section": "performance",
       "comparators": {
-        "ft_steps_per_s": 173.8,
-        "vanilla_steps_per_s": 94.2,
-        "ft_vs_vanilla_wall_per_step_ratio": 0.543
+        "ft_steps_per_s": 165.0,
+        "vanilla_steps_per_s": 88.9,
+        "ft_vs_vanilla_wall_per_step_ratio": 0.542
       },
       "notes": [
         "per-checkpoint = (ckpt=50 run - checkpoint-disabled run) / 4; startup+loop cancel in the delta",
@@ -211,14 +211,14 @@
     {
       "scenario": "recovery_economics",
       "unit": "seconds saved",
-      "median": 0.179,
-      "p10": -0.244,
-      "p90": 0.402,
-      "repeats": 5,
+      "median": 0.259,
+      "p10": -0.368,
+      "p90": 2.438,
+      "repeats": 20,
       "section": "performance",
       "comparators": {
-        "auto_resume_s": 4.006,
-        "raw_rerun_from_zero_s": 4.17,
+        "auto_resume_s": 5.004,
+        "raw_rerun_from_zero_s": 5.278,
         "steps_not_recomputed": 40.0
       },
       "notes": [
@@ -231,17 +231,17 @@
     {
       "scenario": "submit_latency",
       "unit": "s (p50 cold)",
-      "median": 0.0172,
-      "p10": 0.017,
-      "p90": 0.0184,
-      "repeats": 5,
+      "median": 0.0249,
+      "p10": 0.0239,
+      "p90": 0.0259,
+      "repeats": 20,
       "section": "performance",
       "comparators": {
-        "cold_p95": 0.0186,
-        "warm_p50": 0.0171,
-        "warm_p95": 0.0172,
-        "phase_launch_s": 0.0166,
-        "phase_child_s": 0.0006
+        "cold_p95": 0.0262,
+        "warm_p50": 0.0258,
+        "warm_p95": 0.035,
+        "phase_launch_s": 0.0239,
+        "phase_child_s": 0.0009
       },
       "notes": [
         "total = child.first_step_ts \u2212 parent.t0 (submit call \u2192 first training step), MEASURED from wall-clock instants the child stamps into metrics.json \u2014 never a baked figure",
