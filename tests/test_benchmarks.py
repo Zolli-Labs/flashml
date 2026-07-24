@@ -37,6 +37,7 @@ def test_registry_lists_all_scenarios():
         "adoption_cost",
         "fault_recovery_matrix",
         "checkpoint_integrity",
+        "crash_storm",
     }
 
 
@@ -378,6 +379,96 @@ def test_checkpoint_integrity_stress_runs():
     assert row.unit == "integrity_rate"
     assert row.median <= 1.0
     assert row.comparators["iterations"] == 20
+
+
+# --------------------------------------------------------------------------
+# Task 3 — the S3 crash_storm goodput scenario (bench_smoke 4-trial /
+# bench_stress full 16-trial; spawns a real fan-out of crash+resume runs).
+# The scenario needs no torch — the crash trainer is stdlib+flashruntime only.
+# --------------------------------------------------------------------------
+def test_registry_lists_crash_storm():
+    assert "crash_storm" in registry.SCENARIOS
+
+
+@pytest.mark.bench_smoke
+def test_crash_storm_smoke_runs():
+    # smoke variant: a 4-trial storm (evens 0,2 crash on their fresh attempt).
+    # This test asserts the row SHAPE + counted fields present and within bounds —
+    # NOT a measured outcome. Two distinct kinds of assertion live here:
+    #   * completed <= 4 and 0 <= goodput <= 1 are BOUNDS on MEASURED numbers —
+    #     completion is an observed outcome (if the storm resumes fewer than 4
+    #     trials, that ships as the measured number, so we bound, never ==);
+    #   * crashed_first_attempt == 2 is a MECHANISM check, not a measured-outcome
+    #     assertion: the crash arming is DETERMINISTIC (even trial index ⇒ armed),
+    #     so exactly the two even trials (0, 2) must have crashed-then-resumed.
+    #     Asserting 2 tests that the fan-out wired the per-trial crash correctly,
+    #     the same way faults.py's unit tests assert the injection fired.
+    from benchmarks.scenarios import crash_storm
+
+    row = crash_storm._storm(n_trials=4, repeats=1)
+    assert isinstance(row, ResultRow)
+    assert row.scenario == "crash_storm"
+    assert row.section == "resilience"
+    assert row.unit == "completed/4"
+    assert row.median <= 4.0                                   # completions COUNTED (bound, never ==)
+    gp = row.comparators["goodput_fraction"]
+    assert 0.0 <= gp <= 1.0                                    # a fraction, MEASURED
+    assert row.comparators["crashed_first_attempt"] == 2.0    # MECHANISM check: evens 0,2 armed
+    assert row.comparators["manual_interventions"] == 0.0     # derived (fully automatic), not asserted-as-outcome
+    assert "wallclock_penalty_fraction" in row.comparators
+    assert row.notes                                          # documents the goodput accounting
+
+
+@pytest.mark.bench_stress
+def test_crash_storm_full_runs():
+    # full variant: the 16-trial storm (8 evens crash+resume). Deselected by
+    # default (bench_stress) — it spawns 24 storm launches + 16 clean launches.
+    from benchmarks.scenarios import crash_storm
+
+    row = crash_storm._storm(n_trials=16, repeats=1)
+    assert isinstance(row, ResultRow)
+    assert row.scenario == "crash_storm"
+    assert row.section == "resilience"
+    assert row.unit == "completed/16"
+    assert row.median <= 16.0                                 # completions COUNTED (bound)
+    assert 0.0 <= row.comparators["goodput_fraction"] <= 1.0
+    assert row.comparators["crashed_first_attempt"] <= 8.0    # at most the 8 even trials armed
+
+
+# --------------------------------------------------------------------------
+# Task 3 — the goodput accounting is a pure function (testable without running
+# the storm). Pins the CONSERVATIVE executed-steps formula and its worked
+# example, exactly the way checkpoint_integrity's _integrity is pinned.
+# --------------------------------------------------------------------------
+def test_goodput_worked_example_16_trials():
+    from benchmarks.scenarios.crash_storm import _goodput
+
+    # 8 crashed (steps 8, resumed_from 4) + 8 clean (steps 8, resumed_from 0):
+    #   useful = 16*8 = 128;  executed = 8*(8+4) + 8*(8+0) = 96 + 64 = 160
+    #   goodput = 128/160 = 0.8;  crashed_first_attempt = 8
+    trials = [{"steps": 8, "resumed_from": 4}] * 8 + [{"steps": 8, "resumed_from": 0}] * 8
+    frac, useful, executed, crashed = _goodput(trials)
+    assert (useful, executed, crashed) == (128, 160, 8)
+    assert frac == 0.8
+
+
+def test_goodput_clean_trials_are_full_goodput():
+    from benchmarks.scenarios.crash_storm import _goodput
+
+    # no crashes ⇒ resumed_from 0 everywhere ⇒ executed == useful ⇒ 1.0
+    frac, useful, executed, crashed = _goodput([{"steps": 8, "resumed_from": 0}] * 4)
+    assert crashed == 0
+    assert useful == executed == 32
+    assert frac == 1.0
+
+
+def test_goodput_is_nan_safe_on_empty_trials():
+    from benchmarks.scenarios.crash_storm import _goodput
+
+    # a storm that completed zero trials ⇒ 0 executed ⇒ 0.0 (never a fabricated 1.0)
+    frac, useful, executed, crashed = _goodput([])
+    assert (useful, executed, crashed) == (0, 0, 0)
+    assert frac == 0.0
 
 
 # --------------------------------------------------------------------------
