@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **Honesty (spec §5b, user-mandated):** measured only; correctness counted not asserted; comparator failures reported as observed; modelled baselines labeled "modelled"; unfavorable results shipped with framing. Fabrication is a review failure.
-- **Readability (§2b):** scenario files ≤120 lines, hypothesis at top, measurement method auditable from the file alone; `benchmarks/faults.py` helpers have one clear job each with a why-docstring.
+- **Readability (§2b):** scenario files ≤120 lines, hypothesis at top, measurement method auditable from the file alone; `benchmarks/faults.py` helpers have one clear job each with a why-docstring. *(Amended after T4 review: the auditable-method docstring clause dominates the line count — suite reality is 200-390-line scenario files whose overage is docstring+embedded task scripts; the binding test is "auditable and readable", not the number.)*
 - **TDD is mandatory per task (user-mandated this run):** failing test first for every helper and every scenario's smoke variant; RED evidence (command + failing output) and GREEN in each report.
 - **Markers:** `bench_smoke` exists (deselected by default). This plan adds `bench_stress` — register in pyproject markers AND add to `addopts` deselection. Every scenario gets a smoke test; long loops (S2 full, anything >60 s) get stress tests.
 - **Subprocess PATH discipline:** every scenario spawning children uses the existing `benchmarks` helpers (`bench_env()` / `ensure_venv_on_path()`) — never bare `os.environ`. (Recurring bug; reviewers check.)
