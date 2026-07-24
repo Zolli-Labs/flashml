@@ -13,9 +13,11 @@ run's story is never interrupted by being watched.
 
 Data model: pass the parsed `viewer_v1` run.json through verbatim, then
 ENRICH it — each attempt gains its own `metrics` (metrics.jsonl tail) and
-`log_tail` (launcher.log tail) read from that attempt's `output_dir`, and a
+`log_tail` (launcher.log tail), `telemetry` (sampler tail) and `ranks`
+(per-rank heartbeats), read from that attempt's `output_dir`, and a
 top-level `checkpoints` list is assembled from the job ckpt roots (each root
-is the sibling `ckpt/` dir of an attempt dir).
+is the sibling `ckpt/` dir of an attempt dir). A top-level `monitor` object
+carries the newest telemetry sample (machine stats + process tree).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from pathlib import Path
 
 _METRICS_TAIL = 500  # last N points per attempt — enough for a loss curve, bounded memory
 _LOG_TAIL = 100  # last N lines of launcher.log — a glance at what the process last said
+_TELEMETRY_TAIL = 150  # last N sampler ticks — a ~5 min usage chart at 2 s period
 
 # The tail window we seek-and-read from the END of a growing log. WHY BOUNDED:
 # the viewer re-reads these files every ~2 s against a LIVE run; a chatty
@@ -78,6 +81,8 @@ def _collect(run_dir: Path) -> dict:
         attempt_dir = Path(out) if out else None
         row["metrics"] = _metrics_tail(attempt_dir) if attempt_dir else []
         row["log_tail"] = _log_tail(attempt_dir) if attempt_dir else ""
+        row["telemetry"] = _telemetry_tail(attempt_dir) if attempt_dir else []
+        row["ranks"] = _ranks(attempt_dir) if attempt_dir else []
         enriched.append(row)
         if attempt_dir is not None:
             # The job ckpt root is the sibling `ckpt/` dir of the attempt dir
@@ -95,6 +100,17 @@ def _collect(run_dir: Path) -> dict:
             continue
     manifests.sort(key=lambda m: (m.get("job_id", ""), m.get("step", 0)))
     doc["checkpoints"] = manifests
+
+    # The newest telemetry sample anywhere becomes the machine-level `monitor`
+    # object (KPI tiles + machine node read it). Newest-by-ts, not "the
+    # running attempt's", so a just-finished run still shows its last stats.
+    monitor = None
+    for row in enriched:
+        tel = row.get("telemetry") or []
+        cand = tel[-1] if tel else None
+        if isinstance(cand, dict) and (monitor is None or cand.get("ts", 0) > monitor.get("ts", 0)):
+            monitor = cand
+    doc["monitor"] = monitor
     return doc
 
 
@@ -141,6 +157,44 @@ def _metrics_tail(attempt_dir: Path, limit: int = _METRICS_TAIL) -> list[dict]:
         if isinstance(rec, dict):
             records.append(rec)
     return records[-limit:]
+
+
+def _telemetry_tail(attempt_dir: Path, limit: int = _TELEMETRY_TAIL) -> list[dict]:
+    """Last `limit` sampler ticks from `telemetry.jsonl` — the same bounded
+    tail-window + skip-torn-lines discipline as `_metrics_tail` (the sampler
+    appends live while we read)."""
+    records: list[dict] = []
+    for line in _tail_window_lines(attempt_dir / "telemetry.jsonl"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue  # torn/partial line — skip it, keep the rest
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records[-limit:]
+
+
+def _ranks(attempt_dir: Path) -> list[dict]:
+    """Every parseable `ranks/rank-*.json` heartbeat, sorted by rank. A torn
+    file (a rank mid-os.replace cannot tear, but a foreign writer could) is
+    skipped; a missing dir is simply 'not instrumented' — []."""
+    try:
+        paths = sorted((attempt_dir / "ranks").glob("rank-*.json"))
+    except OSError:
+        return []
+    out: list[dict] = []
+    for p in paths:
+        try:
+            rec = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    out.sort(key=lambda r: r.get("rank", 0) if isinstance(r.get("rank", 0), int) else 0)
+    return out
 
 
 def _log_tail(attempt_dir: Path, tail_lines: int = _LOG_TAIL) -> str:
