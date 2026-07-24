@@ -101,7 +101,7 @@ function renderKpiTiles(tiles) {
   const el = document.getElementById("kpis");
   el.innerHTML = tiles.map((t) =>
     '<div class="kpi"><div class="kpi-label">' + fmEsc(t.label) + "</div>" +
-    '<div class="kpi-value"' + (t.color ? ' style="color:' + t.color + '"' : "") + ">" +
+    '<div class="kpi-value"' + (t.color ? ' style="color:' + fmEsc(t.color) + '"' : "") + ">" +
     fmEsc(t.value) + "</div>" +
     (t.hint ? '<div class="kpi-hint">' + fmEsc(t.hint) + "</div>" : "") +
     "</div>"

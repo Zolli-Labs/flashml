@@ -15,6 +15,13 @@ def test_js_defines_the_component_api():
         assert f"function {name}" in FLOWMAP_JS, f"missing {name}"
 
 
+def test_kpi_color_is_escaped():
+    # renderKpiTiles interpolates t.color into a style="color:..." attribute;
+    # per the component's escaping policy every interpolated value passes
+    # fmEsc, so a malicious/odd t.color can't break out of the attribute.
+    assert "fmEsc(t.color)" in FLOWMAP_JS
+
+
 def test_css_targets_the_contract_elements():
     for sel in ("#kpis", "#flowmap", "#detail", ".fm-node", ".fm-selected"):
         assert sel in FLOWMAP_CSS, f"missing selector {sel}"
