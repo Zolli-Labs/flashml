@@ -12,6 +12,12 @@ Two layers:
 from __future__ import annotations
 
 import json
+import os
+import py_compile
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -22,13 +28,14 @@ from benchmarks.registry import ResultRow
 # --------------------------------------------------------------------------
 # registry + schema
 # --------------------------------------------------------------------------
-def test_registry_lists_five_scenarios():
+def test_registry_lists_all_scenarios():
     assert set(registry.SCENARIOS) == {
         "launch_overhead",
         "loop_overhead",
         "recovery_economics",
         "hpo_sweep",
         "adoption_cost",
+        "fault_recovery_matrix",
     }
 
 
@@ -149,3 +156,142 @@ def test_hpo_sweep_runs():
 @pytest.mark.bench_smoke
 def test_adoption_cost_runs():
     _assert_runs("adoption_cost")
+
+
+# --------------------------------------------------------------------------
+# Task 1 — the additive `section` field (resilience rows live beside perf ones)
+# --------------------------------------------------------------------------
+def test_resultrow_section_defaults_to_performance():
+    row = ResultRow(scenario="x", unit="seconds", median=1.0, p10=1.0, p90=1.0, repeats=3)
+    assert row.section == "performance"
+
+
+def test_old_baseline_json_without_section_still_validates():
+    # a pre-Task-1 row (no `section` key) must still load — additive default
+    legacy = {"scenario": "launch_overhead", "unit": "seconds", "median": 0.42,
+              "p10": 0.4, "p90": 0.45, "repeats": 5, "comparators": {}, "notes": []}
+    again = ResultRow.model_validate(legacy)
+    assert again.section == "performance"
+
+
+def test_resultrow_section_round_trips_as_resilience():
+    row = ResultRow(scenario="fault_recovery_matrix", section="resilience",
+                    unit="correct/5", median=5.0, p10=5.0, p90=5.0, repeats=1)
+    again = ResultRow.model_validate(json.loads(row.model_dump_json()))
+    assert again.section == "resilience"
+
+
+# --------------------------------------------------------------------------
+# Task 1 — faults.py helpers (unit; the three T2/T3 consume verbatim)
+# --------------------------------------------------------------------------
+def test_write_crashy_trainer_materializes_and_compiles(tmp_path):
+    from benchmarks import faults
+
+    for crash in (None, "import_error", "systemexit_mid", "hang_after_step"):
+        script = faults.write_crashy_trainer(tmp_path, steps=8, checkpoint_every=2, crash=crash)
+        assert isinstance(script, Path) and script.is_file()
+        # compiles as valid Python (a broken heredoc would fail here, not at run)
+        py_compile.compile(str(script), doraise=True)
+
+
+def test_write_crashy_trainer_import_error_names_a_missing_module(tmp_path):
+    from benchmarks import faults
+
+    script = faults.write_crashy_trainer(tmp_path, steps=8, checkpoint_every=2, crash="import_error")
+    text = script.read_text()
+    assert "import definitely_not_a_module" in text  # top-level ⇒ dies at import
+
+
+def test_write_crashy_trainer_runs_to_completion_and_checkpoints(tmp_path):
+    # a crash=None script actually runs (stdlib+ft only, no torch) and leaves a
+    # valid manifest tree — proves the resume substrate the matrix depends on.
+    from benchmarks import faults
+    from flashruntime.checkpoint.local import latest_valid_manifest
+
+    script = faults.write_crashy_trainer(tmp_path, steps=8, checkpoint_every=2, crash=None)
+    ckpt = tmp_path / "ckpt"
+    env = {**os.environ, "FLASHML_CKPT_DIR": str(ckpt), "FLASHML_OUTPUT_DIR": str(tmp_path)}
+    proc = subprocess.run([sys.executable, str(script), "--steps", "8", "--checkpoint-every", "2"],
+                          cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    manifest = latest_valid_manifest(ckpt)
+    assert manifest is not None and manifest.step == 8
+
+
+def test_kill_child_fires_on_a_live_subprocess():
+    from benchmarks import faults
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    class _StubRun:  # the polling seam: kill_child only needs `.attempts`
+        attempts = [{"pid": str(proc.pid), "state": "RUNNING"}]
+
+    try:
+        fired = faults.kill_child(_StubRun(), when=lambda: True, timeout_s=3.0)
+        assert fired is True
+        assert proc.wait(timeout=3) is not None  # actually died
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+def test_kill_child_does_not_fire_when_predicate_stays_false():
+    from benchmarks import faults
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    class _StubRun:
+        attempts = [{"pid": str(proc.pid), "state": "RUNNING"}]
+
+    try:
+        fired = faults.kill_child(_StubRun(), when=lambda: False, timeout_s=0.3)
+        assert fired is False
+        assert proc.poll() is None  # still alive — nothing was signalled
+    finally:
+        proc.kill()
+        proc.wait(timeout=3)
+
+
+def test_corrupt_newest_part_disqualifies_the_newest_manifest(tmp_path):
+    from benchmarks import faults
+    from flashruntime.checkpoint.local import latest_valid_manifest, write_manifest
+
+    for step in (2, 4):
+        d = tmp_path / f"step-{step:06d}"
+        d.mkdir()
+        (d / "model.pt").write_bytes(b"\x5a" * 4096)
+        write_manifest(d, job_id="local", attempt_id="local", step=step)
+
+    assert latest_valid_manifest(tmp_path).step == 4  # newest before corruption
+
+    corrupted = faults.corrupt_newest_part(tmp_path)
+    assert corrupted is not None and corrupted.is_file()
+    assert corrupted.parent.name == "step-000004"  # it hit the newest step's part
+    # newest manifest now fails hash verification ⇒ recovery falls back to step 2
+    assert latest_valid_manifest(tmp_path).step == 2
+
+
+def test_corrupt_newest_part_returns_none_on_empty_tree(tmp_path):
+    from benchmarks import faults
+
+    assert faults.corrupt_newest_part(tmp_path) is None
+
+
+# --------------------------------------------------------------------------
+# Task 1 — the S1 scenario smoke (spawns real runs; bench_smoke)
+# --------------------------------------------------------------------------
+def test_registry_lists_fault_recovery_matrix():
+    assert "fault_recovery_matrix" in registry.SCENARIOS
+
+
+@pytest.mark.bench_smoke
+def test_fault_recovery_matrix_runs():
+    from benchmarks.scenarios import fault_recovery_matrix
+
+    row = fault_recovery_matrix.run(repeats=1)
+    assert isinstance(row, ResultRow)
+    assert row.scenario == "fault_recovery_matrix"
+    assert row.section == "resilience"
+    assert row.unit == "correct/5"
+    assert len(row.notes) >= 5  # one verdict line per case

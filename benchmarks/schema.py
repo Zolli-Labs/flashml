@@ -27,6 +27,11 @@ class ResultRow(BaseModel):
     p10: float
     p90: float
     repeats: int
+    # Which table this row belongs under. Additive (default "performance") so
+    # every pre-existing row and result JSON still validates unchanged; the
+    # resilience suite (S1) stamps "resilience" so a fault-recovery COUNT never
+    # shares a table with a wall-clock median.
+    section: str = "performance"
     comparators: dict[str, float] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
