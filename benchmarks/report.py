@@ -42,6 +42,38 @@ def _fmt(x: float) -> str:
     return f"{x:.3g}" if isinstance(x, (int, float)) else str(x)
 
 
+# Canonical section order for the grouped docs render: the wall-clock
+# "Performance" tables first, then the fault-tolerance "Resilience" tables. Any
+# section not named here falls after these in first-appearance order (so a
+# future section never silently disappears).
+SECTION_ORDER = ("performance", "resilience")
+
+
+def _table_body(rows: list[dict]) -> str:
+    """The header + one line per row — no smoke caption (callers add it once)."""
+    lines = ["| scenario | median | unit | p10 | p90 | repeats |",
+             "| --- | --- | --- | --- | --- | --- |"]
+    for r in rows:
+        lines.append(
+            f"| {r['scenario']} | {_fmt(r['median'])} | {r['unit']} "
+            f"| {_fmt(r['p10'])} | {_fmt(r['p90'])} | {r['repeats']} |"
+        )
+    return "\n".join(lines)
+
+
+def _group_by_section(rows: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Group rows by ``section`` (default "performance"), row order preserved
+    within each. Sections come out in ``SECTION_ORDER`` first, then any unknown
+    section by first appearance — so a doc with only one section yields exactly
+    one group (never an empty table for the absent section)."""
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        groups.setdefault(r.get("section", "performance"), []).append(r)
+    ordered = [s for s in SECTION_ORDER if s in groups]
+    ordered += [s for s in groups if s not in SECTION_ORDER]
+    return [(s, groups[s]) for s in ordered]
+
+
 def render_markdown(rows: Iterable, smoke: bool = False) -> str:
     """Compact summary table (one line per scenario). Refuses thin rows unless
     ``smoke``; a smoke table is captioned as non-representative."""
@@ -51,13 +83,7 @@ def render_markdown(rows: Iterable, smoke: bool = False) -> str:
     if smoke:
         lines.append(SMOKE_LABEL)
         lines.append("")
-    lines.append("| scenario | median | unit | p10 | p90 | repeats |")
-    lines.append("| --- | --- | --- | --- | --- | --- |")
-    for r in rows:
-        lines.append(
-            f"| {r['scenario']} | {_fmt(r['median'])} | {r['unit']} "
-            f"| {_fmt(r['p10'])} | {_fmt(r['p90'])} | {r['repeats']} |"
-        )
+    lines.append(_table_body(rows))
     return "\n".join(lines)
 
 
@@ -91,9 +117,11 @@ def _detail(row: dict, hypotheses: dict[str, str]) -> str:
 
 
 def render_document(bench: dict, smoke: bool = False) -> str:
-    """Full Markdown body for the docs page: the host block, the summary table,
-    per-scenario detail (hypothesis + comparators + notes), and the repro
-    command. ``bench`` is a ``bench_v1`` document (``schema``/``host``/``rows``)."""
+    """Full Markdown body for the docs page: the host block, the grouped summary
+    tables (one per ``section`` — "Performance", "Resilience"), per-scenario
+    detail (hypothesis + comparators + notes), and the repro command. ``bench``
+    is a ``bench_v1`` document (``schema``/``host``/``rows``). Refuses thin rows
+    (``repeats`` < 3) unless ``smoke``, exactly as :func:`render_markdown`."""
     try:  # hypotheses come from the scenario modules; optional so a bare JSON still renders
         from benchmarks.registry import SCENARIOS
 
@@ -102,12 +130,21 @@ def render_document(bench: dict, smoke: bool = False) -> str:
         hypotheses = {}
 
     rows = [_as_dict(r) for r in bench.get("rows", [])]
+    _check_repeats(rows, smoke)  # refuse thin rows once, across every section
+    grouped = _group_by_section(rows)
     parts = []
     if smoke:
         parts += [SMOKE_LABEL, ""]
     parts += ["**Measured on:**", "", _host_table(bench.get("host", {})), ""]
     parts += ["Reproduce every number below with:", "", "```bash", REPRO, "```", ""]
-    parts += ["## Summary", "", render_markdown(rows, smoke=smoke), ""]
-    for row in rows:
-        parts.append(_detail(row, hypotheses))
+    # One headed summary table per present section — a resilience COUNT never
+    # shares a table with a wall-clock median. Sections with no rows are omitted.
+    parts += ["## Summary", ""]
+    for section, section_rows in grouped:
+        parts += [f"### {section.title()}", "", _table_body(section_rows), ""]
+    # Per-scenario detail follows the same grouping so the page reads section by
+    # section top to bottom.
+    for _, section_rows in grouped:
+        for row in section_rows:
+            parts.append(_detail(row, hypotheses))
     return "\n".join(parts).rstrip() + "\n"

@@ -148,12 +148,18 @@ faked. A measured baseline is committed under
 | Checkpoint cost | **~6 ms / checkpoint** | A few-KB state dict; at or below the run-to-run noise floor at this size. A larger model surfaces a real positive cost. |
 | Auto-resume | **40 steps not recomputed** | The size-*independent* guarantee: resume never re-does work past the last valid checkpoint. |
 | Adoption | **7 lines** | To make a vanilla script framework-ready (difflib vs each project's own docs). |
+| Resilience | **5/5 faults handled · 5/5 integrity under `kill -9`** | Every fault type routed to the right typed recovery; a checkpoint survives a mid-write `SIGKILL` on 5/5 kills (naive `torch.save`: 5/5 corrupted). Storm of 16 crash-armed trials: 16/16 auto-resumed, 0 manual. Dead-worker MTTD **3.0 s**, MTTR **3 ms**. |
 
-These are smoke-scale numbers on one host: the models are tiny, so the
+The *timing* rows are smoke-scale on one host: the models are tiny, so the
 *wall-clock* saved by recovery is at the noise floor here. The figure that
 scales is `steps_not_recomputed`, not seconds — the seconds-saved grows with the
 compute between the last checkpoint and the crash (negligible at smoke size,
-hours on a real job). Full provenance and caveats live in the result file.
+hours on a real job). The resilience counts are exact, not smoke-diluted: they
+are *counted* from real fault injection (`kill -9` in the checkpoint-write
+window, a storm of crash-armed trials, a killed lease worker), and the full
+Resilience table with per-scenario method lives in
+[the benchmarks page](docs/site/benchmarks.md). Full provenance and caveats live
+in the result file.
 
 ---
 

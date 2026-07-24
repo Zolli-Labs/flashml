@@ -118,6 +118,53 @@ def test_report_full_document_renders_host_block():
 
 
 # --------------------------------------------------------------------------
+# Task 6 — grouped render: rows split into a Performance table and a
+# Resilience table by their ``section``; canonical order (Performance first);
+# a single-section doc renders exactly one table (never an EMPTY headed table
+# for the absent section). The repeats<3 refusal still fires across all rows.
+# --------------------------------------------------------------------------
+_GROUPED_FIXTURE = {
+    "schema": "bench_v1",
+    "host": _FIXTURE["host"],
+    "rows": [
+        {"scenario": "launch_overhead", "section": "performance", "unit": "seconds",
+         "median": 0.42, "p10": 0.40, "p90": 0.45, "repeats": 5, "comparators": {}, "notes": []},
+        {"scenario": "fault_recovery_matrix", "section": "resilience", "unit": "correct/5",
+         "median": 5.0, "p10": 5.0, "p90": 5.0, "repeats": 5, "comparators": {}, "notes": []},
+    ],
+}
+
+
+def test_report_document_groups_rows_into_two_section_tables():
+    text = report.render_document(_GROUPED_FIXTURE)
+    # a headed table per present section, Performance before Resilience
+    assert "### Performance" in text
+    assert "### Resilience" in text
+    assert text.index("### Performance") < text.index("### Resilience")
+    # each scenario's summary row lands under the right heading: the perf row
+    # sits above the Resilience heading, the resilience row below it
+    assert text.index("launch_overhead") < text.index("### Resilience") < text.index("fault_recovery_matrix")
+
+
+def test_report_document_single_section_renders_one_table_no_empty():
+    single = {"schema": "bench_v1", "host": _FIXTURE["host"], "rows": _FIXTURE["rows"]}
+    text = report.render_document(single)
+    assert "### Performance" in text
+    assert "### Resilience" not in text  # no empty resilience table when absent
+
+
+def test_report_document_grouped_still_refuses_thin_rows():
+    thin = {"schema": "bench_v1", "host": _FIXTURE["host"], "rows": [
+        {"scenario": "launch_overhead", "section": "performance", "unit": "seconds",
+         "median": 0.42, "p10": 0.40, "p90": 0.45, "repeats": 5, "comparators": {}, "notes": []},
+        {"scenario": "fault_recovery_matrix", "section": "resilience", "unit": "correct/5",
+         "median": 5.0, "p10": 5.0, "p90": 5.0, "repeats": 2, "comparators": {}, "notes": []},
+    ]}
+    with pytest.raises(ValueError, match="repeats"):
+        report.render_document(thin)
+
+
+# --------------------------------------------------------------------------
 # scenario smoke tests — assert they RUN, never assert numbers
 # --------------------------------------------------------------------------
 def _assert_runs(name: str):
