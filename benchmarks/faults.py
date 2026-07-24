@@ -99,6 +99,13 @@ def main() -> None:
         # past them and finishes. The key is checkpoint progress, not wall-clock.
         if start == 0 and step >= trigger:
             if CRASH == "systemexit_mid":
+                # Honest channel for the ACTUAL crash step: this fresh attempt is
+                # about to die, so metrics.json will never exist for it. Record the
+                # crash step to the JOB-SCOPED ckpt dir (it outlives this attempt,
+                # like the manifests) just before raising; the resumed retry reads
+                # it back below and folds it into its final metrics, so `crashed_at`
+                # reaches run state from an OBSERVED write, never a model.
+                (root / "crashed_at.json").write_text(json.dumps({"crashed_at": step}))
                 raise SystemExit(3)          # bare int ⇒ no traceback ⇒ WORKER_CRASH
             if CRASH == "hang_after_step":
                 while True:
@@ -106,6 +113,15 @@ def main() -> None:
 
     _save(root, step, payload)               # final checkpoint
     result = {"steps": step, "resumed_from": start}
+    crash_marker = root / "crashed_at.json"
+    if start > 0 and crash_marker.is_file():
+        # a fresh attempt crashed here earlier (systemexit_mid) and left its crash
+        # step behind; surface it in THIS (resumed) attempt's metrics so the crash
+        # storm can measure recompute = crashed_at - resumed_from from actuals.
+        try:
+            result["crashed_at"] = int(json.loads(crash_marker.read_text())["crashed_at"])
+        except (ValueError, KeyError, OSError):
+            pass                             # unreadable marker ⇒ not measurable, never faked
     Path("metrics.json").write_text(json.dumps(result))
     print(json.dumps(result))
 

@@ -411,8 +411,18 @@ def test_crash_storm_smoke_runs():
     assert row.section == "resilience"
     assert row.unit == "completed/4"
     assert row.median <= 4.0                                   # completions COUNTED (bound, never ==)
-    gp = row.comparators["goodput_fraction"]
-    assert 0.0 <= gp <= 1.0                                    # a fraction, MEASURED
+    # the comparator key NAMES the computation: a worst-case LOWER bound, not an
+    # executed-steps measurement (fix round 1 — the old `goodput_fraction` key lied)
+    assert "goodput_fraction" not in row.comparators
+    gp = row.comparators["goodput_lower_bound"]
+    assert 0.0 <= gp <= 1.0                                    # a LOWER-BOUND fraction, MEASURED
+    # recompute_fraction is the reuse-aware TRUTH, MEASURED from the actual crash
+    # step (crashed_at - resumed_from). In this geometry the crash fires AT the
+    # checkpoint (step 4 == resumed_from) ⇒ exactly 0 steps recomputed — a MEASURED
+    # 0.0 (crashed_at surfaced from run state), never a fabricated one.
+    rf = row.comparators["recompute_fraction"]
+    assert 0.0 <= rf <= 1.0                                    # a fraction, MEASURED from actual crash steps
+    assert rf == 0.0                                           # MECHANISM: crash AT checkpoint ⇒ 0 recompute
     assert row.comparators["crashed_first_attempt"] == 2.0    # MECHANISM check: evens 0,2 armed
     assert row.comparators["manual_interventions"] == 0.0     # derived (fully automatic), not asserted-as-outcome
     assert "wallclock_penalty_fraction" in row.comparators
@@ -431,7 +441,8 @@ def test_crash_storm_full_runs():
     assert row.section == "resilience"
     assert row.unit == "completed/16"
     assert row.median <= 16.0                                 # completions COUNTED (bound)
-    assert 0.0 <= row.comparators["goodput_fraction"] <= 1.0
+    assert 0.0 <= row.comparators["goodput_lower_bound"] <= 1.0
+    assert 0.0 <= row.comparators["recompute_fraction"] <= 1.0  # MEASURED from actual crash steps
     assert row.comparators["crashed_first_attempt"] <= 8.0    # at most the 8 even trials armed
 
 
@@ -465,9 +476,71 @@ def test_goodput_clean_trials_are_full_goodput():
 def test_goodput_is_nan_safe_on_empty_trials():
     from benchmarks.scenarios.crash_storm import _goodput
 
-    # a storm that completed zero trials ⇒ 0 executed ⇒ 0.0 (never a fabricated 1.0)
-    frac, useful, executed, crashed = _goodput([])
-    assert (useful, executed, crashed) == (0, 0, 0)
+    # a storm that completed zero trials ⇒ 0 charged ⇒ 0.0 (never a fabricated 1.0)
+    frac, useful, charged, crashed = _goodput([])
+    assert (useful, charged, crashed) == (0, 0, 0)
+    assert frac == 0.0
+
+
+# --------------------------------------------------------------------------
+# Task 3 (fix round 1) — recompute_fraction is MEASURED from the ACTUAL crash
+# step, not modelled. Pure-function coverage of the recompute arithmetic,
+# testable without running the storm (mirrors _goodput / _integrity): each
+# crashed trial surfaces `crashed_at`; recompute = crashed_at - resumed_from is
+# the genuinely re-executed tail (0 when the crash fired AT a checkpoint), and
+# recompute_fraction = Σ recompute / Σ useful.
+# --------------------------------------------------------------------------
+def test_recompute_worked_example_measures_zero_at_checkpoint_crash():
+    from benchmarks.scenarios.crash_storm import _recompute
+
+    # STEPS=8/EVERY=2 geometry: the fresh attempt checkpoints at step 4 THEN
+    # crashes at step 4; the resume restores step 4 ⇒ recompute = 4 - 4 = 0 per
+    # crashed trial. The reuse-aware TRUTH the 0.8 lower bound deliberately
+    # over-charges — a MEASURED 0.0, read from crashed_at in run state.
+    trials = [{"steps": 8, "resumed_from": 4, "crashed_at": 4}] * 8 + [{"steps": 8, "resumed_from": 0}] * 8
+    frac, recompute, useful, measured = _recompute(trials)
+    assert (recompute, useful, measured) == (0, 128, 8)
+    assert frac == 0.0
+
+
+def test_recompute_measures_the_sub_checkpoint_tail():
+    from benchmarks.scenarios.crash_storm import _recompute
+
+    # if a crash had fired at step 5 with the newest checkpoint at 4, the
+    # genuinely recomputed tail is 5 - 4 = 1 step per crashed trial (step 5 is
+    # re-run on resume). This is what the measurement CATCHES that the lower
+    # bound cannot distinguish from a checkpoint-aligned crash.
+    trials = [{"steps": 8, "resumed_from": 4, "crashed_at": 5}] * 2
+    frac, recompute, useful, measured = _recompute(trials)
+    assert (recompute, useful, measured) == (2, 16, 2)
+    assert frac == 0.125
+
+
+def test_recompute_skips_crashed_trials_without_an_observable_crash_step():
+    from benchmarks.scenarios.crash_storm import _recompute
+
+    # NOT-measurable convention (never fabricate): a crashed trial (resumed_from>0)
+    # that surfaced NO crashed_at is EXCLUDED from both numerator and the measured
+    # count — it does not contribute a fabricated 0. Only the trial that surfaced
+    # a crash step is measured; useful spans all completed trials.
+    trials = [
+        {"steps": 8, "resumed_from": 4, "crashed_at": 6},  # measured: recompute 6-4=2
+        {"steps": 8, "resumed_from": 4},                    # crashed but crash step not observable ⇒ skipped
+        {"steps": 8, "resumed_from": 0},                    # clean ⇒ never crashed
+    ]
+    frac, recompute, useful, measured = _recompute(trials)
+    assert measured == 1
+    assert recompute == 2
+    assert useful == 24
+    assert frac == 2 / 24
+
+
+def test_recompute_is_nan_safe_on_empty_trials():
+    from benchmarks.scenarios.crash_storm import _recompute
+
+    # zero completed trials ⇒ 0 useful ⇒ 0.0 (NaN-safe, never a fabricated value)
+    frac, recompute, useful, measured = _recompute([])
+    assert (recompute, useful, measured) == (0, 0, 0)
     assert frac == 0.0
 
 
