@@ -19,15 +19,18 @@ MEASUREMENT METHOD (auditable from this file alone):
     while a VALID earlier manifest already exists, ``kill_child`` SIGKILLs the
     live attempt. Integrity for the iteration is COUNTED from observable run
     state — never a ``try/assert`` — as: terminal ``SUCCEEDED`` AND a
-    hash-verified manifest still the latest AND, when the kill actually landed in
-    a window, a resume from a verified EARLIER step (``resumed_from > 0``, i.e.
-    it fell back PAST the torn step rather than restoring it). ``integrity_rate``
-    = mean over N (target 1.0, MEASURED — a mishandled iteration lowers it and is
-    a FINDING, not a test to fix).
+    hash-verified manifest still the latest AND a resume from a verified EARLIER
+    step (``resumed_from > 0``, i.e. it fell back PAST the torn step rather than
+    restoring it). ``integrity_rate`` = survived_hits / ``torn_writes_hit`` — the
+    denominator is IN-WINDOW KILLS ONLY (target 1.0, MEASURED — a mishandled
+    in-window kill lowers it and is a FINDING, not a test to fix).
 
-  * ``torn_writes_hit`` COUNTS the kills that fired inside a write window; it is
-    reported SEPARATELY from window-missed iterations (a run that finished before
-    the poller saw a window) — the two are never blended into the rate.
+  * ``torn_writes_hit`` COUNTS the kills that fired inside a write window and IS
+    the rate's denominator. Window-missed iterations (a clean uninterrupted run
+    whose kill never landed) are EXCLUDED entirely — never counted as trivial 1.0
+    successes that would silently inflate the rate on a slower box. If no kill
+    lands (``torn_writes_hit == 0``) the rate is NOT measurable this run and is
+    reported as 0.0 (NaN-safe — never a fabricated 1.0) with an explicit note.
 
   * naive comparator — an identically-shaped trainer that ``torch.save``s an
     8 MB state to ``latest.pt`` each step, killed the instant that file is
@@ -239,6 +242,36 @@ def _naive_iteration(tmp: Path) -> tuple[bool, bool, str | None]:
 
 
 # --------------------------------------------------------------------------
+# rate computation — a pure function so it's testable without running chaos
+# --------------------------------------------------------------------------
+def _integrity(outcomes: list[tuple[bool, bool]]) -> tuple[float, int, int]:
+    """integrity_rate over TORN-WRITE HITS ONLY — the honest denominator.
+
+    ``outcomes`` is one ``(fired, survived)`` per iteration:
+      * ``fired``    — the kill -9 landed inside the manifest-absent write window
+                       (an actual torn-write hit — the ONLY case that tests the
+                       parts-first/manifest-last guarantee);
+      * ``survived`` — that iteration passed the integrity check (terminal
+                       SUCCEEDED, a hash-verified manifest still latest, and a
+                       resume from a verified EARLIER step > 0 — it fell back PAST
+                       the torn step rather than restoring it).
+
+    Returns ``(rate, hits, missed)``. The denominator is ``hits`` (fired kills)
+    ONLY: window-missed iterations (``fired`` is False — a clean uninterrupted
+    run) are EXCLUDED entirely, never counted as trivial 1.0 successes that would
+    silently inflate the rate on a slower box. When ``hits == 0`` the guarantee
+    was never actually exercised this run, so the rate is NOT measurable; we
+    return ``0.0`` — NaN-safe, and deliberately NOT a fabricated 1.0 — and the
+    caller emits the "not measurable" note stating the reason.
+    """
+    hits = sum(1 for fired, _ in outcomes if fired)
+    missed = sum(1 for fired, _ in outcomes if not fired)
+    survived_hits = sum(1 for fired, survived in outcomes if fired and survived)
+    rate = survived_hits / hits if hits else 0.0  # 0.0, never 1.0, when unmeasurable
+    return rate, hits, missed
+
+
+# --------------------------------------------------------------------------
 # the N-iteration chaos loop
 # --------------------------------------------------------------------------
 def run(repeats: int) -> ResultRow:
@@ -253,8 +286,7 @@ def run(repeats: int) -> ResultRow:
     except ImportError:
         torch_ok = False
 
-    integrity_flags: list[float] = []
-    torn_writes_hit = 0
+    outcomes: list[tuple[bool, bool]] = []  # one (fired, survived) per iteration
     resumed_steps: list[int] = []
     naive_fail = 0
     naive_torn_hit = 0
@@ -264,9 +296,7 @@ def run(repeats: int) -> ResultRow:
         root = Path(td)
         for i in range(n):
             fired, integrity, r = _flash_iteration(root / f"flash-{i:03d}")
-            integrity_flags.append(1.0 if integrity else 0.0)
-            if fired:
-                torn_writes_hit += 1
+            outcomes.append((fired, integrity))
             if r:
                 resumed_steps.append(r)
             if torch_ok:
@@ -278,20 +308,50 @@ def run(repeats: int) -> ResultRow:
                     if mode:
                         naive_modes[mode] = naive_modes.get(mode, 0) + 1
 
-    integrity_rate = round(sum(integrity_flags) / n, 3)
+    # integrity_rate is measured over TORN-WRITE HITS ONLY (see _integrity): a
+    # window-missed iteration (a clean uninterrupted run) is NOT a trivial 1.0
+    # success — it is excluded from the denominator, never blended into the rate.
+    rate, torn_writes_hit, window_missed = _integrity(outcomes)
+    measurable = torn_writes_hit > 0
+    integrity_rate = round(rate, 3)  # 0.0 (never 1.0) when not measurable — see note below
+    # per-hit survival flags: the honest distribution the percentiles bound (only
+    # the in-window kills that form the rate's denominator; empty ⇒ percentile 0.0).
+    hit_survivals = [1.0 if survived else 0.0 for fired, survived in outcomes if fired]
     mean_resume = round(sum(resumed_steps) / len(resumed_steps), 1) if resumed_steps else 0.0
 
     comparators: dict[str, float] = {
         "iterations": float(n),
-        "torn_writes_hit": float(torn_writes_hit),  # flash kills that landed in a write window
+        "torn_writes_hit": float(torn_writes_hit),  # flash kills that landed in a write window — the DENOMINATOR
+        "window_missed": float(window_missed),      # clean uninterrupted runs — EXCLUDED from the rate
     }
     notes = [
         "integrity is COUNTED from run state (terminal SUCCEEDED + a hash-verified latest "
-        "manifest still present + a resume from a verified earlier step>0 when the kill landed "
-        "in a window), never asserted — a mishandled iteration lowers the rate as a FINDING",
-        f"write window = a step-* dir on disk WITHOUT its manifest.json (parts first, manifest "
-        f"last); kill -9 fired inside it on {torn_writes_hit}/{n} iterations (torn_writes_hit) — "
-        f"window-missed iterations are counted SEPARATELY, never blended into integrity_rate",
+        "manifest still present + a resume from a verified earlier step>0), never asserted — "
+        "a mishandled in-window kill lowers the rate as a FINDING, not a test to fix",
+    ]
+    if measurable:
+        notes.append(
+            f"integrity_rate = survived_hits / torn_writes_hit — the denominator is IN-WINDOW "
+            f"KILLS ONLY ({torn_writes_hit}/{n} iterations); window-missed iterations "
+            f"({window_missed}/{n} — a clean uninterrupted run whose kill never landed) are "
+            f"EXCLUDED entirely, never counted as trivial 1.0 successes that would inflate the rate"
+        )
+    else:
+        notes.append(
+            f"no in-window kills landed this run — rate not measurable ({window_missed}/{n} "
+            f"iterations missed the write window; the parts-first/manifest-last guarantee was "
+            f"never exercised). Reported as 0.0 (NaN-safe — never a fabricated 1.0); raise "
+            f"repeats to land a torn-write hit"
+        )
+    notes += [
+        "honesty: the write window is open a LARGE fraction of each step BY DESIGN "
+        "(checkpoint_every=1, an 8 MB part per step widens the part-on-disk/manifest-absent "
+        "gap), so hitting it is near-guaranteed — the claim is that flash SURVIVED every hit, "
+        "NOT that hitting the window was hard",
+        "honesty: torn_writes_hit certifies a kill during the manifest-absent COMMIT window "
+        "(which includes the part-complete/manifest-pending sub-case), not necessarily a "
+        "byte-torn part file — the guarantee under test is that a manifest-less step is never "
+        "restored, however far its parts got",
         f"mean resume step across torn-write hits: {mean_resume} (a verified EARLIER checkpoint, "
         "never the torn one)",
     ]
@@ -316,8 +376,10 @@ def run(repeats: int) -> ResultRow:
         section="resilience",
         unit="integrity_rate",
         median=integrity_rate,
-        p10=percentile(integrity_flags, 0.1),
-        p90=percentile(integrity_flags, 0.9),
+        # percentiles bound the per-HIT survival distribution (same denominator as
+        # the rate); empty when unmeasurable ⇒ percentile() returns 0.0, not 1.0.
+        p10=percentile(hit_survivals, 0.1),
+        p90=percentile(hit_survivals, 0.9),
         repeats=n,
         comparators=comparators,
         notes=notes,

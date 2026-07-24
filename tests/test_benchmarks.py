@@ -378,3 +378,44 @@ def test_checkpoint_integrity_stress_runs():
     assert row.unit == "integrity_rate"
     assert row.median <= 1.0
     assert row.comparators["iterations"] == 20
+
+
+# --------------------------------------------------------------------------
+# Task 2 (fix round 1) — integrity_rate is measured over TORN-WRITE HITS ONLY.
+# Pure-function coverage of the rate computation, testable without running
+# chaos: a window-missed iteration (the kill never fired — a clean uninterrupted
+# run) must NEVER count toward the denominator as a trivial 1.0 success that
+# would silently inflate the rate on a slower box.
+# --------------------------------------------------------------------------
+def test_integrity_rate_excludes_window_missed_iterations():
+    from benchmarks.scenarios.checkpoint_integrity import _integrity
+
+    # (fired, survived) per iteration. The middle row's kill never landed in a
+    # window (fired=False) — it is EXCLUDED from the denominator entirely, not
+    # counted as a free 1.0 success alongside the two real in-window kills.
+    rate, hits, missed = _integrity([(True, True), (False, True), (True, True)])
+    assert rate == 1.0
+    assert hits == 2      # only the two in-window kills form the denominator
+    assert missed == 1    # the window-missed row, reported separately
+
+
+def test_integrity_rate_is_survived_hits_over_hits():
+    from benchmarks.scenarios.checkpoint_integrity import _integrity
+
+    rate, hits, missed = _integrity([(True, False), (True, True)])
+    assert rate == 0.5    # one of two in-window kills survived
+    assert hits == 2
+    assert missed == 0
+
+
+def test_integrity_rate_not_measurable_when_no_kill_landed():
+    from benchmarks.scenarios.checkpoint_integrity import _integrity
+
+    # all-missed: no kill ever landed in a window ⇒ the guarantee was never
+    # tested, so the rate is NOT measurable. The helper returns 0.0 — NaN-safe,
+    # and deliberately NOT a fabricated 1.0 — with hits=0 so the caller emits the
+    # "not measurable this run" note.
+    rate, hits, missed = _integrity([(False, True), (False, False)])
+    assert hits == 0
+    assert missed == 2
+    assert rate == 0.0    # never a fabricated 1.0
