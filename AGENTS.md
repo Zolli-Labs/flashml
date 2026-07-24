@@ -115,10 +115,14 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   SDK-local path; the *service coordinator* still recovers via implicit
   lease-expiry (classify/decide uncalled there).
 - **Live run viewer** (`viewer/`, July 2026): a stdlib, zero-CDN HTML page
-  served on loopback during a watched run (topology / loss / verified
-  checkpoints / recovery feed), reading only the versioned `run.json`
-  (`viewer_v1`) contract. `flash.submit(watch=…)` opens it (auto: on at a
-  TTY, off in pipes/CI); the built docs site is served from it at `/docs`.
+  served on loopback during a watched run (KPI dashboard strip, machine →
+  worker → rank process flow map with click-in detail panel, loss +
+  resource charts, verified checkpoints, recovery feed; telemetry from
+  `monitor/` ResourceSampler — optional psutil via the `[monitor]` extra —
+  and per-rank heartbeat files from `flashruntime.torch`), reading only
+  the versioned `run.json` (`viewer_v1`) contract. `flash.submit(watch=…)`
+  opens it (auto: on at a TTY, off in pipes/CI); the built docs site is
+  served from it at `/docs`.
 - **Docs site + benchmarks** (July 2026): PyTorch-style site under
   `docs/site/`, built by `scripts/build_docs.py` (every byte inline;
   `--check` link-verifies), deployed to GitHub Pages on release. Honest
@@ -138,7 +142,7 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   + GitHub Pages); `scripts/audit_secrets.sh` (worktree + history scan,
   CLEAN); `CONTRIBUTING.md` / `SECURITY.md` / `CHANGELOG.md`; PEP 561
   `py.typed`, built docs bundled in the wheel.
-- Tests: `pytest` → **237 passed, 1 skipped** (the CUDA-gated GPU test),
+- Tests: `pytest` → **264 passed, 1 skipped** (the CUDA-gated GPU test),
   9 deselected (integration + bench_smoke, opt-in via `-m`; live in
   `tests/integration/` with env auto-skip). Images: `deploy/docker/`.
   Full-loop proof: workspace-root `e2e/` (`make e2e`, `make e2e-demo`) +
@@ -195,7 +199,7 @@ cross-machine resume). Suite: **237 passed, 1 skipped, 9 deselected**.
 
 ```bash
 uv venv && uv pip install -e ".[sklearn,dev]"
-pytest                    # 237 passed, 1 skipped (CUDA-gated), 9 deselected
+pytest                    # 264 passed, 1 skipped (CUDA-gated), 9 deselected
                           #   (+ opt-in: pytest -m integration / -m bench_smoke)
 ```
 
