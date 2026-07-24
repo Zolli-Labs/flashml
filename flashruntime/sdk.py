@@ -27,6 +27,7 @@ from pathlib import Path
 
 from flashruntime.launchers import LaunchState
 from flashruntime.launchers.local import LocalProcessLauncher
+from flashruntime.monitor import ResourceSampler
 from flashruntime.protocol.v1alpha1 import RecoveryActionType
 from flashruntime.recovery import classify, decide
 from flashruntime.recovery.signals import from_local_launch
@@ -324,7 +325,20 @@ def _drive(
             handle = launcher.launch(spec, job_id, attempt_id)
             run.record_event("LAUNCH_STARTED", f"{attempt_id} launched (pid {handle.execution_id})")
             run._add_attempt(attempt_id, job_id, handle, started_at)
-            final_state = handle.wait()
+            # Telemetry beside the attempt (machine + process tree → the run
+            # viewer's flow map). Best-effort like the viewer itself: a
+            # sampler that cannot start must never fail the run.
+            sampler = None
+            try:
+                sampler = ResourceSampler(handle.output_dir, int(handle.execution_id))
+                sampler.start()
+            except Exception:  # noqa: BLE001 — observability never fails a run
+                sampler = None
+            try:
+                final_state = handle.wait()
+            finally:
+                if sampler is not None:
+                    sampler.stop()
             run._logs.append(f"--- {attempt_id} ({final_state.value}) ---\n{handle.logs()}")
             run._finish_attempt(attempt_id, final_state)
 

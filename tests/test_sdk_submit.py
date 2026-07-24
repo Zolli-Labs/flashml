@@ -141,3 +141,22 @@ def test_non_fanout_uses_shared_local_ckpt_dir(tmp_path):
         output_dir=tmp_path / "out",
     )
     assert run.trials[0]["ckpt"] == str(tmp_path / "out" / "local" / "ckpt")
+
+
+def test_submit_writes_attempt_telemetry(tmp_path):
+    # the run-monitor sampler runs beside every launched attempt and must
+    # leave at least one sample even for a sub-second command
+    import flashruntime as flash
+
+    source = _write_script(tmp_path, "print('quick')")
+    run = flash.submit(
+        flash.CommandWorkload(command=f"{sys.executable} train.py", source={"path": source}),
+        output_dir=tmp_path / "out",
+    )
+    assert run.state.value == "SUCCEEDED"
+    from pathlib import Path
+
+    tel = Path(run.attempts[0]["output_dir"]) / "telemetry.jsonl"
+    assert tel.is_file()
+    lines = [json.loads(l) for l in tel.read_text().splitlines() if l.strip()]
+    assert lines and set(lines[0]) == {"ts", "machine", "processes"}
