@@ -15,17 +15,23 @@ OF TRUTH — a dark `#0d1117` field, `#161b22` panels, `#21262d` borders,
 `#c9d1d9`/`#8b949e` text, and five oklch accents (cyan running, green
 succeeded+verified, amber leased+recovering, red failed, violet
 checkpoints). `dashboard.py` imports these same values so the two surfaces
-read as one product. Sections, top to bottom: header → topology canvas →
-loss canvas → checkpoint timeline → events feed → collapsible logs.
+read as one product. Sections, top to bottom (layout A, spec 2026-07-23):
+header → KPI strip → process flow map (machine → workers → ranks; click a
+node for the slide-in detail panel) → loss + resource charts → checkpoint
+timeline → events feed → collapsible logs. The flow-map/KPI component
+itself lives in `viewer/flowmap.py` — shared with the coordinator
+dashboard.
 
-The drawing is plain, commented JS organized by section (`drawTopology`,
-`drawLoss`, `renderCheckpoints`, …) — no framework, no build step, no
-minification. Same readability bar as the Python (spec §2b).
+The drawing is plain, commented JS organized by section (`renderFlowmap`,
+`drawLoss`, `drawResources`, `renderCheckpoints`, …) — no framework, no
+build step, no minification. Same readability bar as the Python (spec §2b).
 """
 
 from __future__ import annotations
 
 import json
+
+from flashruntime.viewer.flowmap import FLOWMAP_CSS, FLOWMAP_JS
 
 # --------------------------------------------------------------------------
 # Visual tokens — the single source of truth for BOTH this page and the
@@ -89,8 +95,11 @@ _TEMPLATE = r"""<!doctype html>
   .panel { background: %%panel%%; border: 1px solid %%border%%; border-radius: 8px;
            padding: 12px; }
   canvas { display: block; width: 100%; background: %%bg_inset%%; border-radius: 6px; }
-  #topology { height: 220px; }
   #loss { height: 200px; }
+  #resources { height: 160px; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+%%FLOWMAP_CSS%%
 
   /* checkpoint timeline ------------------------------------------------ */
   #checkpoints { display: flex; gap: 10px; overflow-x: auto; padding: 6px 2px; }
@@ -146,13 +155,27 @@ _TEMPLATE = r"""<!doctype html>
 <div id="err"></div>
 
 <section>
-  <h2>Topology</h2>
-  <div class="panel"><canvas id="topology"></canvas></div>
+  <h2>Run</h2>
+  <div id="kpis"></div>
 </section>
 
 <section>
-  <h2>Loss</h2>
-  <div class="panel"><canvas id="loss"></canvas></div>
+  <h2>Process map</h2>
+  <div class="panel" style="position: relative;">
+    <div id="flowmap"></div>
+    <div id="detail" hidden></div>
+  </div>
+</section>
+
+<section class="charts">
+  <div>
+    <h2>Loss</h2>
+    <div class="panel"><canvas id="loss"></canvas></div>
+  </div>
+  <div>
+    <h2>Resources</h2>
+    <div class="panel"><canvas id="resources"></canvas></div>
+  </div>
 </section>
 
 <section>
@@ -184,33 +207,7 @@ const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const clockTime = (ts) => (typeof ts === "number" ? new Date(ts * 1000).toLocaleTimeString() : "");
 
-// Map a lifecycle state to its accent. Shared vocabulary with dashboard.py so
-// a node here and a row there mean the same color.
-function stateColor(s) {
-  switch (s) {
-    case "RUNNING": return T.running;                 // cyan
-    case "LEASED": case "RECOVERING": return T.warn;  // amber
-    case "SUCCEEDED": case "COMPLETED": return T.ok;   // green
-    case "FAILED": return T.fail;                      // red
-    default: return T.muted;                           // PENDING / CANCELLED
-  }
-}
-
-// Append an alpha to an oklch(...) color: `oklch(L C H)` -> `oklch(L C H / a)`.
-// (Canvas accepts CSS Color 4 oklch; this keeps the pulse the same hue.)
-function withAlpha(color, a) {
-  return color.replace(/\)\s*$/, " / " + a.toFixed(3) + ")");
-}
-
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
+%%FLOWMAP_JS%%
 
 // Size a canvas for the device pixel ratio so lines are crisp on retina and
 // the drawing coordinate system stays in CSS pixels. Returns {ctx, w, h}.
@@ -235,77 +232,13 @@ function renderHeader(s) {
   $("hmode").textContent = (s.workload && s.workload.mode) || "—";
   const badge = $("hstate");
   badge.textContent = s.state || "—";
-  badge.style.color = stateColor(s.state);
-  badge.style.borderColor = stateColor(s.state);
+  badge.style.color = fmStateColor(s.state);
+  badge.style.borderColor = fmStateColor(s.state);
   const attempts = s.attempts || [];
   // "restarts used" = attempts whose id carries an -rN recovery suffix.
   const used = attempts.filter((a) => /-r\d+$/.test(a.attempt_id || "")).length;
   $("hrestarts").textContent = used + " / " + (s.max_restarts == null ? "?" : s.max_restarts);
   $("hattempts").textContent = String(attempts.length);
-}
-
-// ---- topology canvas (animated) -----------------------------------------
-// A single machine box holds one node per attempt/rank, colored by state. A
-// Mode-A fan-out is just many attempts, so the same grid reads as a task grid.
-// RUNNING nodes get a soft radial pulse (the reason drawTopology runs every
-// animation frame, not only on poll).
-function drawTopology(now) {
-  const canvas = $("topology");
-  const { ctx, w, h } = fitCanvas(canvas);
-  ctx.clearRect(0, 0, w, h);
-  const s = STATE;
-  if (!s || s.error) return; // the error banner (renderStatic) tells the story
-
-  const pad = 14;
-  const boxX = pad, boxY = pad + 16, boxW = w - pad * 2, boxH = h - boxY - pad;
-  ctx.strokeStyle = T.border;
-  ctx.lineWidth = 1;
-  roundRect(ctx, boxX, boxY, boxW, boxH, 10);
-  ctx.stroke();
-  ctx.fillStyle = T.muted;
-  ctx.font = "11px " + fontFamily();
-  ctx.textAlign = "left";
-  ctx.fillText("127.0.0.1 · localhost", boxX + 2, pad + 10);
-
-  const attempts = s.attempts || [];
-  const n = attempts.length;
-  if (!n) {
-    ctx.fillStyle = T.muted;
-    ctx.textAlign = "center";
-    ctx.fillText("waiting for first launch…", w / 2, boxY + boxH / 2);
-    return;
-  }
-
-  // A near-square grid of nodes inside the box.
-  const cols = Math.ceil(Math.sqrt(n));
-  const rows = Math.ceil(n / cols);
-  const cellW = boxW / cols, cellH = boxH / rows;
-  const radius = Math.max(6, Math.min(cellW, cellH) * 0.26);
-  attempts.forEach((a, i) => {
-    const cx = boxX + ((i % cols) + 0.5) * cellW;
-    const cy = boxY + (Math.floor(i / cols) + 0.5) * cellH;
-    const color = stateColor(a.state);
-    // soft radial pulse while this node is RUNNING
-    if (a.state === "RUNNING") {
-      const puls = 0.5 + 0.5 * Math.sin(now / 500);
-      const grad = ctx.createRadialGradient(cx, cy, radius * 0.5, cx, cy, radius * 2.6);
-      grad.addColorStop(0, withAlpha(color, 0.18 + 0.22 * puls));
-      grad.addColorStop(1, withAlpha(color, 0));
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius * 2.6, 0, 2 * Math.PI);
-      ctx.fill();
-    }
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
-    ctx.fill();
-    ctx.fillStyle = T.text;
-    ctx.font = "10px " + fontFamily();
-    ctx.textAlign = "center";
-    const label = String(a.attempt_id || ("#" + i)).replace(/^task-/, "");
-    ctx.fillText(label, cx, cy + radius + 12);
-  });
 }
 
 function fontFamily() {
@@ -466,7 +399,132 @@ function renderLogs(s) {
   $("logbody").textContent = chunks.length ? chunks.join("\n\n") : "—";
 }
 
-// ---- everything that redraws on a poll (topology animates separately) ----
+// ---- KPI tiles + steps/s derivation ---------------------------------------
+// steps/s comes from consecutive rank heartbeats (ts + step) observed across
+// polls — the only honest rate source; without heartbeats the tile shows "—".
+let prevBeat = null;      // {ts, step} from the previous poll
+let stepsPerSec = null;   // last derived rate
+
+function fmtDur(sec) {
+  if (typeof sec !== "number" || !isFinite(sec) || sec < 0) return "—";
+  const m = Math.floor(sec / 60), r = Math.floor(sec % 60), h = Math.floor(m / 60);
+  return h ? h + "h " + (m % 60) + "m" : m + ":" + String(r).padStart(2, "0");
+}
+
+function newestBeat(s) {
+  let best = null;
+  (s.attempts || []).forEach((a) => (a.ranks || []).forEach((r) => {
+    if (typeof r.step === "number" && typeof r.ts === "number" &&
+        (best == null || r.ts > best.ts)) best = r;
+  }));
+  return best;
+}
+
+function updateRate(s) {
+  const beat = newestBeat(s);
+  if (!beat) return;
+  if (prevBeat && beat.ts > prevBeat.ts && beat.step >= prevBeat.step) {
+    const rate = (beat.step - prevBeat.step) / (beat.ts - prevBeat.ts);
+    if (isFinite(rate) && rate > 0) stepsPerSec = rate;
+  }
+  prevBeat = { ts: beat.ts, step: beat.step };
+}
+
+function buildKpiTiles(s) {
+  const m = (s.monitor && s.monitor.machine) || null;
+  const beat = newestBeat(s);
+  const attempts = s.attempts || [];
+  const used = attempts.filter((a) => /-r\d+$/.test(a.attempt_id || "")).length;
+  const verified = (s.checkpoints || []).filter((c) => c.validation === "hash_verified").length;
+  const end = s.finished_at || Date.now() / 1000;
+  const hint = m && m.limited ? "flashruntime[monitor]" : undefined;
+  const tiles = [
+    { label: "state", value: s.state || "—", color: fmStateColor(s.state) },
+    { label: "elapsed", value: fmtDur(end - s.started_at) },
+    { label: "step", value: beat && beat.step != null ? String(beat.step) : "—" },
+    { label: "steps/s", value: stepsPerSec != null ? stepsPerSec.toFixed(2) : "—" },
+    { label: "step latency", value: stepsPerSec ? Math.round(1000 / stepsPerSec) + " ms" : "—" },
+    { label: "cpu", value: m && m.cpu_percent != null ? Math.round(m.cpu_percent) + "%" : "—", hint: hint },
+    { label: "memory", value: m && m.mem_used != null ? fmFmtBytes(m.mem_used) : "—", hint: hint },
+    { label: "restarts", value: used + " / " + (s.max_restarts == null ? "?" : s.max_restarts) },
+    { label: "ckpts ✓", value: String(verified) },
+  ];
+  if (m && m.gpus && m.gpus.length) {
+    tiles.splice(7, 0, { label: "gpu", value: Math.round(m.gpus[0].util_percent) + "%" });
+  }
+  return tiles;
+}
+
+// ---- resource chart ---------------------------------------------------------
+// cpu% (cyan) + memory% (violet) over the telemetry tail, 0–100 fixed axis.
+function collectResources(s) {
+  const samples = [];
+  (s.attempts || []).forEach((a) => (a.telemetry || []).forEach((t) => {
+    if (t && t.machine && typeof t.ts === "number") samples.push(t);
+  }));
+  samples.sort((p, q) => p.ts - q.ts);
+  return samples.slice(-150);
+}
+
+function drawResources() {
+  const canvas = $("resources");
+  const { ctx, w, h } = fitCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  if (!STATE || STATE.error) return;
+  const samples = collectResources(STATE);
+  const usable = samples.filter((t) => t.machine.cpu_percent != null);
+  if (usable.length < 2) {
+    ctx.fillStyle = T.muted;
+    ctx.font = "11px " + fontFamily();
+    ctx.textAlign = "center";
+    const msg = samples.length
+      ? 'cpu/mem need psutil — pip install "flashruntime[monitor]"'
+      : "no telemetry yet";
+    ctx.fillText(msg, w / 2, h / 2);
+    return;
+  }
+  const padL = 8, padR = 56, padT = 10, padB = 14;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+  const t0 = usable[0].ts, t1 = usable[usable.length - 1].ts;
+  const sx = (ts) => padL + ((ts - t0) / (t1 - t0 || 1)) * plotW;
+  const sy = (pct) => padT + (1 - Math.min(100, Math.max(0, pct)) / 100) * plotH;
+  ctx.strokeStyle = T.border;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, padT + plotH);
+  ctx.lineTo(padL + plotW, padT + plotH);
+  ctx.stroke();
+  const series = (pick, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    let started = false;
+    usable.forEach((t) => {
+      const v = pick(t);
+      if (typeof v !== "number") return;
+      started ? ctx.lineTo(sx(t.ts), sy(v)) : ctx.moveTo(sx(t.ts), sy(v));
+      started = true;
+    });
+    ctx.stroke();
+  };
+  const memPct = (t) => t.machine.mem_total
+    ? 100 * t.machine.mem_used / t.machine.mem_total : null;
+  series((t) => t.machine.cpu_percent, T.running);
+  series(memPct, T.ckpt);
+  const last = usable[usable.length - 1];
+  ctx.font = "11px " + fontFamily();
+  ctx.textAlign = "left";
+  ctx.fillStyle = T.running;
+  ctx.fillText("cpu " + Math.round(last.machine.cpu_percent) + "%",
+    padL + plotW + 4, sy(last.machine.cpu_percent));
+  const mp = memPct(last);
+  if (mp != null) {
+    ctx.fillStyle = T.ckpt;
+    ctx.fillText("mem " + Math.round(mp) + "%", padL + plotW + 4, sy(mp));
+  }
+}
+
+// ---- everything that redraws on a poll ------------------------------------
 function renderStatic() {
   const s = STATE;
   const err = $("err");
@@ -478,7 +536,12 @@ function renderStatic() {
   }
   err.style.display = "none";
   renderHeader(s);
+  updateRate(s);
+  renderKpiTiles(buildKpiTiles(s));
+  renderFlowmap(s);
+  renderDetail(s);
   drawLoss();
+  drawResources();
   renderCheckpoints(s);
   renderEvents(s);
   renderLogs(s);
@@ -499,20 +562,11 @@ async function poll() {
   renderStatic();
 }
 
-// The topology pulse wants smooth animation, so it draws every frame from the
-// latest STATE. We keep rendering after the run finishes (a terminal snapshot
-// just draws a still frame) — the page stays a usable record of the run.
-function animate(now) {
-  if (!document.hidden) drawTopology(now);
-  requestAnimationFrame(animate);
-}
-
 window.addEventListener("resize", () => renderStatic());
 document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
 
 poll();
 setInterval(poll, POLL_MS);
-requestAnimationFrame(animate);
 </script>
 </body>
 </html>
@@ -522,13 +576,14 @@ requestAnimationFrame(animate);
 def render() -> str:
     """Return the live run page as one self-contained HTML string.
 
-    All color tokens are substituted from `TOKENS` (the single source of
-    truth): `%%name%%` placeholders in the CSS, and a `T` object literal in
-    the JS. No other templating — the page is otherwise a static document.
+    The flow-map component (viewer/flowmap.py) is spliced in first, THEN the
+    `%%token%%` placeholders are substituted from `TOKENS` — so the component's
+    CSS resolves against the same single-source-of-truth palette. No other
+    templating — the page is otherwise a static document.
     """
+    html = _TEMPLATE.replace("%%FLOWMAP_CSS%%", FLOWMAP_CSS).replace("%%FLOWMAP_JS%%", FLOWMAP_JS)
     subs = {f"%%{name}%%": value for name, value in TOKENS.items()}
     subs["%%tokens_json%%"] = json.dumps({k: TOKENS[k] for k in _JS_TOKEN_KEYS})
-    html = _TEMPLATE
     for placeholder, value in subs.items():
         html = html.replace(placeholder, value)
     return html

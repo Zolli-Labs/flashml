@@ -4,8 +4,8 @@
 Two things are proven here, both headless (no browser):
 
   1. render() is ONE self-contained HTML document — the sections the design
-     contract names are present (topology, loss, checkpoints, events, the
-     /api/state poll target) and it references NO off-host asset (no CDN,
+     contract names are present (KPI strip, flow map, loss, checkpoints,
+     events, the /api/state poll target) and it references NO off-host asset (no CDN,
      no remote font/image/script). A strict regex over every src=/href= is
      the guard: a self-contained page must survive with the network cut.
   2. submit(watch=True) opens a viewer: it starts a RunViewerServer bound to
@@ -42,10 +42,35 @@ _ASSET_REF = re.compile(r'(?:src|href)\s*=\s*"([^"]*)"', re.IGNORECASE)
 
 def test_render_contains_required_section_markers():
     html = render()
-    for marker in ('id="topology"', 'id="loss"', 'id="checkpoints"', 'id="events"'):
+    for marker in (
+        'id="kpis"',       # KPI dashboard strip
+        'id="flowmap"',    # machine → workers → ranks map
+        'id="detail"',     # slide-in node detail panel
+        'id="resources"',  # cpu/mem usage chart
+        'id="loss"',
+        'id="checkpoints"',
+        'id="events"',
+    ):
         assert marker in html, f"missing section marker {marker}"
     # the page must poll the live snapshot endpoint
     assert "/api/state" in html
+
+
+def test_render_resolves_every_placeholder():
+    # %%token%% and %%FLOWMAP_*%% placeholders must all be substituted —
+    # a leaked %% means a broken style or a missing component
+    assert "%%" not in render()
+
+
+def test_render_embeds_the_flowmap_component():
+    from flashruntime.viewer.flowmap import FLOWMAP_JS
+
+    html = render()
+    # the component JS is embedded verbatim (tokens are substituted in CSS,
+    # not JS, so the JS string survives render() unchanged)
+    assert "function renderFlowmap" in html
+    assert "function renderKpiTiles" in html
+    assert FLOWMAP_JS[:200].strip().splitlines()[0] in html
 
 
 def test_render_is_a_single_html_document():
@@ -68,7 +93,7 @@ def test_render_links_docs_and_polls_named_draw_functions():
     # Docs affordance points at the same-origin docs mount.
     assert "/docs/" in html
     # Drawing is organized by section, per the contract (readable, named JS).
-    assert "drawTopology" in html
+    assert "renderFlowmap" in html
     assert "drawLoss" in html
     # Battery courtesy: polling pauses when the tab is hidden.
     assert "document.hidden" in html
@@ -114,7 +139,7 @@ def test_server_root_serves_the_run_page(tmp_path):
     try:
         with urllib.request.urlopen(url + "/") as resp:
             body = resp.read().decode()
-        assert 'id="topology"' in body
+        assert 'id="flowmap"' in body
         assert "/api/state" in body
     finally:
         server.stop()
