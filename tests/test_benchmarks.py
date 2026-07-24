@@ -38,6 +38,8 @@ def test_registry_lists_all_scenarios():
         "fault_recovery_matrix",
         "checkpoint_integrity",
         "crash_storm",
+        "submit_latency",
+        "fanout_throughput",
     }
 
 
@@ -583,3 +585,103 @@ def test_integrity_rate_not_measurable_when_no_kill_landed():
     assert hits == 0
     assert missed == 2
     assert rate == 0.0    # never a fabricated 1.0
+
+
+# --------------------------------------------------------------------------
+# Task 4 — the S4 submit_latency performance scenario (bench_smoke N=3 /
+# bench_stress N=20). A tiny stdlib trainer stamps proc_start_ts/first_step_ts
+# into metrics.json; the parent records t0 before flash.submit and derives the
+# submit-call→first-step latency + a launch/child phase split. The tests assert
+# the row SHAPE + comparator keys present + bounds on MEASURED numbers
+# (p95 ≥ p50 ≥ 0, phases ≥ 0), NEVER a baked latency figure.
+# --------------------------------------------------------------------------
+def test_registry_lists_submit_latency():
+    assert "submit_latency" in registry.SCENARIOS
+
+
+def _assert_submit_latency_row(row, n: int):
+    assert isinstance(row, ResultRow)
+    assert row.scenario == "submit_latency"
+    assert row.section == "performance"
+    assert row.unit == "s (p50 cold)"
+    assert row.repeats == n
+    for k in ("cold_p95", "warm_p50", "warm_p95", "phase_launch_s", "phase_child_s"):
+        assert k in row.comparators, k
+    # bounds on MEASURED numbers (never an == on a latency): p95 ≥ p50 ≥ 0
+    assert row.median >= 0.0                                    # cold p50 = the headline median
+    assert row.comparators["cold_p95"] >= row.median            # cold p95 ≥ cold p50
+    assert row.comparators["warm_p95"] >= row.comparators["warm_p50"] >= 0.0
+    assert row.comparators["phase_launch_s"] >= 0.0             # launch phase is a duration
+    assert row.comparators["phase_child_s"] >= 0.0             # child phase is a duration
+    assert row.notes                                           # documents the constant-overhead framing
+
+
+@pytest.mark.bench_smoke
+def test_submit_latency_smoke_runs():
+    # smoke variant: N=3 cold samples + a warm pass in the same process.
+    from benchmarks.scenarios import submit_latency
+
+    row = submit_latency._latency(submit_latency.SMOKE_N)
+    _assert_submit_latency_row(row, submit_latency.SMOKE_N)
+
+
+@pytest.mark.bench_stress
+def test_submit_latency_full_runs():
+    # full variant: N=20 cold samples. Deselected by default (bench_stress) — it
+    # spawns 20 cold + 20 warm real child processes.
+    from benchmarks.scenarios import submit_latency
+
+    row = submit_latency._latency(submit_latency.FULL_N)
+    _assert_submit_latency_row(row, submit_latency.FULL_N)
+
+
+# --------------------------------------------------------------------------
+# Task 4 — the S5 fanout_throughput performance scenario (bench_smoke 4-task /
+# bench_stress 16-task). Fan-out tasks (~0.5 s each) → tasks/min vs a plain
+# sequential subprocess loop, plus an amortization curve at 0.5/2/5 s where
+# overhead_frac = (flash_wall − ideal_serial_work)/flash_wall and
+# ideal_serial_work = Σ intended task sleeps (ignoring ALL process overhead, so
+# the fraction charges python startup too). Assertions: row SHAPE + comparator
+# keys present + bounds (throughput > 0, overhead fractions in [0,1)) — never a
+# baked throughput or overhead figure.
+# --------------------------------------------------------------------------
+def test_registry_lists_fanout_throughput():
+    assert "fanout_throughput" in registry.SCENARIOS
+
+
+def _assert_fanout_throughput_row(row, n_tasks: int):
+    assert isinstance(row, ResultRow)
+    assert row.scenario == "fanout_throughput"
+    assert row.section == "performance"
+    assert row.unit == "tasks/min"
+    assert row.repeats == n_tasks
+    assert row.median > 0.0                                    # throughput MEASURED, positive
+    for k in ("sequential_tasks_min", "overhead_frac_05s", "overhead_frac_2s", "overhead_frac_5s"):
+        assert k in row.comparators, k
+    assert row.comparators["sequential_tasks_min"] > 0.0
+    # amortization curve: each overhead fraction is in [0,1) — MEASURED, bounded,
+    # never asserted-equal. (The 0.5 s point is LARGE and the 5 s point is small —
+    # that spread is the finding, shipped as-is.)
+    for k in ("overhead_frac_05s", "overhead_frac_2s", "overhead_frac_5s"):
+        assert 0.0 <= row.comparators[k] < 1.0, k
+    assert row.notes                                          # documents the ideal-denominator choice + sequential honesty
+
+
+@pytest.mark.bench_smoke
+def test_fanout_throughput_smoke_runs():
+    # smoke variant: 4-task 0.5 s fan-out + a minimal (1-task) 2 s/5 s curve.
+    from benchmarks.scenarios import fanout_throughput
+
+    row = fanout_throughput._throughput(fanout_throughput.SMOKE_TASKS)
+    _assert_fanout_throughput_row(row, fanout_throughput.SMOKE_TASKS)
+
+
+@pytest.mark.bench_stress
+def test_fanout_throughput_full_runs():
+    # full variant: 16-task 0.5 s fan-out + the full 2 s/5 s curve. Deselected by
+    # default (bench_stress) — it spawns dozens of real child processes and its
+    # 5 s curve leg makes the whole scenario ~1 min of wall-clock.
+    from benchmarks.scenarios import fanout_throughput
+
+    row = fanout_throughput._throughput(fanout_throughput.FULL_TASKS)
+    _assert_fanout_throughput_row(row, fanout_throughput.FULL_TASKS)

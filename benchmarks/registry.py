@@ -14,11 +14,13 @@ from benchmarks.scenarios import (
     adoption_cost,
     checkpoint_integrity,
     crash_storm,
+    fanout_throughput,
     fault_recovery_matrix,
     hpo_sweep,
     launch_overhead,
     loop_overhead,
     recovery_economics,
+    submit_latency,
 )
 
 __all__ = ["ResultRow", "Scenario", "SCENARIOS"]
@@ -35,6 +37,8 @@ _MODULES = (
     fault_recovery_matrix,
     checkpoint_integrity,
     crash_storm,
+    submit_latency,
+    fanout_throughput,
 )
 
 SCENARIOS: dict[str, Scenario] = {m.name: m for m in _MODULES}
