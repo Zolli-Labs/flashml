@@ -28,3 +28,4 @@ examples/*/metrics.json
 # Leading slash anchors /site to the repo root — do NOT ignore docs/site/ (source).
 /site/
 flashruntime/viewer/_docs/
+.gstack/
