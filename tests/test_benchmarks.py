@@ -40,6 +40,7 @@ def test_registry_lists_all_scenarios():
         "crash_storm",
         "submit_latency",
         "fanout_throughput",
+        "lease_recovery_latency",
     }
 
 
@@ -685,3 +686,67 @@ def test_fanout_throughput_full_runs():
 
     row = fanout_throughput._throughput(fanout_throughput.FULL_TASKS)
     _assert_fanout_throughput_row(row, fanout_throughput.FULL_TASKS)
+
+
+# --------------------------------------------------------------------------
+# Task 5 — the S6 lease_recovery_latency scenario (bench_smoke N=5 death cycle /
+# bench_stress N=20). Boots the REAL FastAPI coordinator via a uvicorn SUBPROCESS
+# on a free loopback port and drives it over real HTTP (httpx) — TestClient is
+# in-process ASGI and cannot back a LATENCY claim, so the row is measured over
+# real sockets. Steady-state claim/heartbeat round-trips (p50/p95) + a
+# kill-a-worker death cycle: worker A claims, heartbeats twice, goes silent; B
+# polls claims until the lease expires and the task is re-claimable (MTTD), then
+# B PUTs the artifact and completes with its sha256 (MTTR). Assertions are the
+# row SHAPE + comparator keys + BOUNDS on MEASURED numbers (mttd ≤ bound + slack;
+# roundtrips == N; MTTR ≥ 0), never a baked latency figure.
+# --------------------------------------------------------------------------
+def test_registry_lists_lease_recovery_latency():
+    assert "lease_recovery_latency" in registry.SCENARIOS
+
+
+def _assert_lease_recovery_row(row, n: int):
+    assert isinstance(row, ResultRow)
+    assert row.scenario == "lease_recovery_latency"
+    assert row.section == "resilience"
+    assert row.unit == "s (MTTR)"
+    assert row.repeats == n
+    for k in ("claim_rt_p50_ms", "claim_rt_p95_ms", "mttd_s", "mttd_bound_s", "roundtrips"):
+        assert k in row.comparators, k
+    # BOUNDS on MEASURED numbers, never an == on a latency:
+    assert row.median >= 0.0                                       # MTTR = B claim → B completes
+    assert row.comparators["claim_rt_p95_ms"] >= row.comparators["claim_rt_p50_ms"] >= 0.0
+    # the sweeper GUARANTEE: detection lands within lease_seconds + 2 s (+ a poll/
+    # round-trip slack); B's own claim-sweep makes the observed value FASTER, so
+    # the measured MTTD must sit at/under the bound (small slack for scheduling).
+    assert row.comparators["mttd_s"] <= row.comparators["mttd_bound_s"] + 1.0
+    assert row.comparators["roundtrips"] == float(n)              # N claim/heartbeat cycles measured
+    assert n >= 5                                                  # smoke floor: ≥5 round-trips
+    assert row.notes                                              # documents sockets choice + Stage-8 debt
+
+
+@pytest.mark.bench_smoke
+def test_lease_recovery_latency_smoke_runs():
+    # smoke variant: N=5 steady-state round-trips + one death cycle. Boots the
+    # real coordinator over real sockets, so it needs fastapi/uvicorn/httpx —
+    # skip cleanly (never fail) when the service extra is absent.
+    pytest.importorskip("uvicorn")
+    pytest.importorskip("httpx")
+    pytest.importorskip("fastapi")
+    from benchmarks.scenarios import lease_recovery_latency
+
+    row = lease_recovery_latency._measure(lease_recovery_latency.SMOKE_N)
+    _assert_lease_recovery_row(row, lease_recovery_latency.SMOKE_N)
+
+
+@pytest.mark.bench_stress
+def test_lease_recovery_latency_full_runs():
+    # full variant: N=20 steady-state round-trips + one death cycle. Deselected by
+    # default (bench_stress) — the death cycle's 3 s lease makes the scenario
+    # multi-second wall-clock even though the round-trips themselves are ms.
+    pytest.importorskip("uvicorn")
+    pytest.importorskip("httpx")
+    pytest.importorskip("fastapi")
+    from benchmarks.scenarios import lease_recovery_latency
+
+    row = lease_recovery_latency._measure(lease_recovery_latency.FULL_N)
+    _assert_lease_recovery_row(row, lease_recovery_latency.FULL_N)
