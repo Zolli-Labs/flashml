@@ -147,18 +147,49 @@ def write_crashy_trainer(
     return path
 
 
-def _newest_pid(run) -> int | None:
-    """The pid of the newest attempt carrying one. ``Run.attempts`` rows store
-    ``pid`` as a string (the launcher's execution_id); the newest row is the
-    live process for a single-launch fault."""
-    for row in reversed(list(run.attempts)):
-        pid = row.get("pid")
-        if pid:
-            try:
-                return int(pid)
-            except (TypeError, ValueError):
-                continue
-    return None
+def _live_pid(run) -> int | None:
+    """The pid of the newest attempt IFF that attempt is still our live child.
+
+    ``Run.attempts`` rows store ``pid`` as a string (the launcher's
+    execution_id); the newest row is the live process for a single-launch fault.
+
+    Pid-reuse guard (reviewer-mandated): once the launched child self-exits, the
+    driver settles its attempt row (``state`` leaves ``"RUNNING"`` and
+    ``finished_at`` is stamped) and the OS is then free to recycle that pid
+    number onto an unrelated process. A fast kill loop — like the
+    checkpoint_integrity scenario's, where a run can finish on its own before the
+    kill lands — could otherwise signal that foreign pid and falsely report a
+    "fired". So we refuse to hand back a pid unless BOTH hold:
+
+      * the run's own bookkeeping still says this attempt is RUNNING / unfinished
+        (the honest guard — the run telling us the child we launched is ours), and
+      * ``os.kill(pid, 0)`` confirms *a* process by that number still exists (a
+        cheap probe that just avoids racing into a ProcessLookupError on signal).
+
+    Neither check alone is sufficient: the row could be RUNNING for a pid that
+    already vanished, and a live pid could belong to a stranger — only the
+    conjunction says "our child, still alive".
+    """
+    rows = list(run.attempts)
+    if not rows:
+        return None
+    row = rows[-1]  # newest attempt == the single-launch fault's live process
+    if row.get("finished_at") is not None or row.get("state") != "RUNNING":
+        return None  # already settled — its pid may now belong to a stranger
+    pid = row.get("pid")
+    if not pid:
+        return None
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)  # signal 0 = existence probe, delivers nothing
+    except ProcessLookupError:
+        return None  # gone — nothing of ours to signal
+    except PermissionError:
+        pass  # exists but owned by another user — still a live process
+    return pid
 
 
 def kill_child(
@@ -174,18 +205,20 @@ def kill_child(
     Polls ``run.attempts`` for the live pid (only the polling seam is used, so a
     stub exposing ``.attempts`` drives it in tests). Returns True once a signal
     is delivered to a live process; False if ``timeout_s`` elapses without
-    ``when()`` ever becoming true (or the target was already gone every time).
+    ``when()`` ever becoming true (or the target was already gone / finished
+    every time — see ``_live_pid`` for the pid-reuse guard that makes the latter
+    honest).
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if when():
-            pid = _newest_pid(run)
+            pid = _live_pid(run)
             if pid is not None:
                 try:
                     os.kill(pid, sig)
                     return True
                 except ProcessLookupError:
-                    pass  # target already exited; keep watching for a live one
+                    pass  # target exited between the probe and the signal; keep watching
         time.sleep(0.001)
     return False
 

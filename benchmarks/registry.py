@@ -12,6 +12,7 @@ from __future__ import annotations
 from benchmarks.schema import ResultRow, Scenario
 from benchmarks.scenarios import (
     adoption_cost,
+    checkpoint_integrity,
     fault_recovery_matrix,
     hpo_sweep,
     launch_overhead,
@@ -31,6 +32,7 @@ _MODULES = (
     hpo_sweep,
     adoption_cost,
     fault_recovery_matrix,
+    checkpoint_integrity,
 )
 
 SCENARIOS: dict[str, Scenario] = {m.name: m for m in _MODULES}

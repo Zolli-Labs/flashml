@@ -36,6 +36,7 @@ def test_registry_lists_all_scenarios():
         "hpo_sweep",
         "adoption_cost",
         "fault_recovery_matrix",
+        "checkpoint_integrity",
     }
 
 
@@ -159,6 +160,23 @@ def test_adoption_cost_runs():
 
 
 # --------------------------------------------------------------------------
+# Task 2 — the `bench_stress` marker (registered AND deselected by default,
+# exactly like bench_smoke; introspected from pytest's own config so a drop of
+# either half — the markers list or the addopts deselection — fails here)
+# --------------------------------------------------------------------------
+def test_bench_stress_marker_is_registered(pytestconfig):
+    markers = pytestconfig.getini("markers")
+    assert any(m.startswith("bench_stress") for m in markers), markers
+
+
+def test_bench_stress_is_deselected_by_default(pytestconfig):
+    # the default addopts must exclude bench_stress just as it excludes bench_smoke
+    addopts = " ".join(pytestconfig.getini("addopts"))
+    assert "not bench_stress" in addopts, addopts
+    assert "not bench_smoke" in addopts, addopts  # unchanged alongside it
+
+
+# --------------------------------------------------------------------------
 # Task 1 — the additive `section` field (resilience rows live beside perf ones)
 # --------------------------------------------------------------------------
 def test_resultrow_section_defaults_to_performance():
@@ -253,6 +271,29 @@ def test_kill_child_does_not_fire_when_predicate_stays_false():
         proc.wait(timeout=3)
 
 
+def test_kill_child_never_signals_a_finished_attempts_reused_pid():
+    # pid-reuse guard (reviewer-mandated): after the launched child self-exits,
+    # the driver settles its attempt row (state != RUNNING / finished_at set) and
+    # the OS may hand that pid number to an UNRELATED live process. kill_child
+    # must refuse to signal such a row — a stub whose newest attempt is finished,
+    # with a real foreign live process sitting on that pid, must return False and
+    # leave the foreign process untouched (never a false "fired").
+    from benchmarks import faults
+
+    foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    class _StubRun:  # newest attempt already terminated; its pid now belongs to `foreign`
+        attempts = [{"pid": str(foreign.pid), "state": "SUCCEEDED", "finished_at": 123.0}]
+
+    try:
+        fired = faults.kill_child(_StubRun(), when=lambda: True, timeout_s=0.3)
+        assert fired is False           # the finished attempt is never signalled
+        assert foreign.poll() is None   # the foreign pid-holder is untouched
+    finally:
+        foreign.kill()
+        foreign.wait(timeout=3)
+
+
 def test_corrupt_newest_part_disqualifies_the_newest_manifest(tmp_path):
     from benchmarks import faults
     from flashruntime.checkpoint.local import latest_valid_manifest, write_manifest
@@ -295,3 +336,45 @@ def test_fault_recovery_matrix_runs():
     assert row.section == "resilience"
     assert row.unit == "correct/5"
     assert len(row.notes) >= 5  # one verdict line per case
+
+
+# --------------------------------------------------------------------------
+# Task 2 — the S2 checkpoint_integrity chaos scenario (bench_smoke N=3 /
+# bench_stress N=20; spawns real runs + a torch naive comparator)
+# --------------------------------------------------------------------------
+def test_registry_lists_checkpoint_integrity():
+    assert "checkpoint_integrity" in registry.SCENARIOS
+
+
+@pytest.mark.bench_smoke
+def test_checkpoint_integrity_smoke_runs():
+    # smoke variant: N=3 iterations. The naive comparator writes/loads a real
+    # torch archive, so torch is required to exercise the full row.
+    pytest.importorskip("torch")
+    from benchmarks.scenarios import checkpoint_integrity
+
+    row = checkpoint_integrity.run(repeats=3)
+    assert isinstance(row, ResultRow)
+    assert row.scenario == "checkpoint_integrity"
+    assert row.section == "resilience"
+    assert row.unit == "integrity_rate"
+    assert row.median <= 1.0                          # a rate, MEASURED (never > 1)
+    assert row.comparators["iterations"] == 3
+    assert "torn_writes_hit" in row.comparators       # kills that landed in a write window
+    assert "naive_torch_save_failure_rate" in row.comparators
+    assert row.notes                                  # documents technique + observed modes
+
+
+@pytest.mark.bench_stress
+def test_checkpoint_integrity_stress_runs():
+    # stress variant: the full N=20 chaos loop. Deselected by default (bench_stress).
+    pytest.importorskip("torch")
+    from benchmarks.scenarios import checkpoint_integrity
+
+    row = checkpoint_integrity.run(repeats=20)
+    assert isinstance(row, ResultRow)
+    assert row.scenario == "checkpoint_integrity"
+    assert row.section == "resilience"
+    assert row.unit == "integrity_rate"
+    assert row.median <= 1.0
+    assert row.comparators["iterations"] == 20
