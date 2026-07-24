@@ -12,7 +12,8 @@ DistributedSampler and restores the newest VALID checkpoint manifest.
 Launched as plain `python train.py`: prepare() is a no-op passthrough.
 
 GUARDRAIL (ADR-0003 — do not rebuild Accelerate): this module wires
-torch's own primitives and REPORTS launch facts — nothing more. The
+torch's own primitives and REPORTS launch facts — nothing more (that
+reporting includes a per-rank heartbeat file the run viewer reads). The
 surface is prepare / checkpoint / log_metrics plus read-only accessors
 (rank / world_size / is_main / start_step / device / backend). The
 boundary is capability, not count: no FSDP policies, no autocast, no
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 __all__ = [
@@ -47,6 +49,48 @@ _restored_step = 0
 # stay at their launched-single-process defaults until prepare() runs.
 _device = "cpu"
 _backend: str | None = None
+
+# Heartbeat state: the run viewer draws machine → worker → rank from a small
+# per-rank JSON each process mirrors to ranks/rank-N.json. Throttled so a
+# tight training loop calling log_metrics()/checkpoint() every step costs at
+# most one small atomic write per second per rank.
+_last_beat = 0.0
+_last_step: int | None = None
+_BEAT_MIN_INTERVAL_S = 1.0
+
+
+def _write_heartbeat(step: int | None = None, force: bool = False) -> None:
+    """Mirror this rank's identity + progress to ranks/rank-<N>.json.
+
+    Atomic (tmp + os.replace, the run.json idiom) so the viewer never reads
+    a torn file. Best-effort by contract: observability must never be able
+    to crash training, so every failure is swallowed. `step=None` reuses the
+    last step this process reported (a refresh must not erase progress)."""
+    global _last_beat, _last_step
+    if step is not None:
+        _last_step = step
+    now = time.time()
+    if not force and now - _last_beat < _BEAT_MIN_INTERVAL_S:
+        return
+    try:
+        beat = {
+            "rank": rank(),
+            "local_rank": int(os.environ.get("LOCAL_RANK", "0")),
+            "pid": os.getpid(),
+            "device": _device,
+            "backend": _backend,
+            "world_size": world_size(),
+            "step": _last_step,
+            "ts": now,
+        }
+        ranks_dir = _output_dir() / "ranks"
+        ranks_dir.mkdir(parents=True, exist_ok=True)
+        tmp = ranks_dir / f".rank-{rank()}.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(beat))
+        os.replace(tmp, ranks_dir / f"rank-{rank()}.json")
+        _last_beat = now
+    except Exception:  # noqa: BLE001 — by contract, swallow everything
+        pass
 
 
 def _resolve_device(world_size: int, cuda_available: bool, local_rank: int) -> str:
@@ -166,6 +210,8 @@ def prepare(model, optimizer=None, dataloader=None):
             optimizer.load_state_dict(torch.load(step_dir / "optimizer.pt", map_location=device))
         _restored_step = manifest.step
 
+    # announce this rank to the run viewer the moment it is wired
+    _write_heartbeat(step=_restored_step, force=True)
     return model, optimizer, dataloader
 
 
@@ -179,6 +225,7 @@ def checkpoint(model, optimizer=None, *, step: int, every: int | None = None) ->
     no-op — a helper whose contract is fault tolerance must never itself
     crash training over a config value (found by the benchmark suite:
     `every=0` used to raise ZeroDivisionError)."""
+    _write_heartbeat(step=step)  # progress signal — fires even on gated calls
     if every is not None and (every <= 0 or step == 0 or step % every != 0):
         return
     import torch
@@ -213,6 +260,9 @@ def checkpoint(model, optimizer=None, *, step: int, every: int | None = None) ->
 def log_metrics(metrics: dict) -> None:
     """Append one JSON record to FLASHML_OUTPUT_DIR/metrics.jsonl (rank 0
     only). Never raises — metrics must never kill training."""
+    # every rank beats (identity/progress); only rank 0 appends metrics below
+    step = metrics.get("step") if isinstance(metrics, dict) else None
+    _write_heartbeat(step=step if isinstance(step, int) else None)
     if not is_main():
         return
     try:

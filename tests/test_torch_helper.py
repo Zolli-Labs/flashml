@@ -19,6 +19,8 @@ def ft(monkeypatch, tmp_path):
     monkeypatch.delenv("WORLD_SIZE", raising=False)
     monkeypatch.delenv("RANK", raising=False)
     monkeypatch.setattr(ft_mod, "_restored_step", 0)
+    monkeypatch.setattr(ft_mod, "_last_beat", 0.0)
+    monkeypatch.setattr(ft_mod, "_last_step", None)
     return ft_mod
 
 
@@ -120,3 +122,69 @@ def test_log_metrics_appends_jsonl_and_never_raises(ft, tmp_path, monkeypatch):
     # unwritable target must not kill training
     monkeypatch.setenv("FLASHML_OUTPUT_DIR", "/dev/null/nope")
     ft.log_metrics({"loss": 0.1})  # must not raise
+
+
+# ---- per-rank heartbeats (run-monitor telemetry) ---------------------------
+# Every rank mirrors its identity + progress to ranks/rank-N.json so the run
+# viewer can draw machine → worker → rank with live PIDs and steps. The write
+# is best-effort and throttled; it must never be able to crash training.
+
+
+def _beat_path(tmp_path):
+    return tmp_path / "out" / "ranks" / "rank-0.json"
+
+
+def test_heartbeat_written_and_shaped(ft, tmp_path):
+    import os
+
+    ft._write_heartbeat(step=7, force=True)
+    beat = json.loads(_beat_path(tmp_path).read_text())
+    assert beat["rank"] == 0 and beat["local_rank"] == 0
+    assert beat["pid"] == os.getpid()
+    assert beat["world_size"] == 1
+    assert beat["step"] == 7
+    assert beat["device"] == "cpu"  # single-process default before prepare()
+    assert isinstance(beat["ts"], float)
+
+
+def test_heartbeat_throttles_but_force_overrides(ft, tmp_path):
+    ft._write_heartbeat(step=1, force=True)
+    ft._write_heartbeat(step=2)  # inside the 1 s window — must be skipped
+    assert json.loads(_beat_path(tmp_path).read_text())["step"] == 1
+    ft._write_heartbeat(step=3, force=True)  # force bypasses the throttle
+    assert json.loads(_beat_path(tmp_path).read_text())["step"] == 3
+
+
+def test_heartbeat_remembers_last_step_when_not_given(ft, tmp_path):
+    ft._write_heartbeat(step=42, force=True)
+    ft._write_heartbeat(force=True)  # no step: reuse the last known one
+    assert json.loads(_beat_path(tmp_path).read_text())["step"] == 42
+
+
+def test_heartbeat_never_raises_on_unwritable_dir(ft, tmp_path, monkeypatch):
+    # FLASHML_OUTPUT_DIR pointing at a *file* makes ranks/ uncreatable
+    blocker = tmp_path / "blocker"
+    blocker.write_text("")
+    monkeypatch.setenv("FLASHML_OUTPUT_DIR", str(blocker))
+    ft._write_heartbeat(step=1, force=True)  # must not raise
+
+
+def test_log_metrics_refreshes_heartbeat(ft, tmp_path):
+    ft.log_metrics({"loss": 0.5, "step": 9})
+    assert json.loads(_beat_path(tmp_path).read_text())["step"] == 9
+
+
+def test_gated_checkpoint_still_beats(ft, tmp_path):
+    # every-gated checkpoint calls return before touching torch, but the
+    # heartbeat (progress signal) must still fire — the loop calls this
+    # every iteration and the viewer wants the live step.
+    ft.checkpoint(None, step=7, every=5)  # gated: no manifest written
+    assert not list((tmp_path / "ckpt").glob("step-*"))
+    assert json.loads(_beat_path(tmp_path).read_text())["step"] == 7
+
+
+def test_prepare_writes_initial_heartbeat(ft, tmp_path):
+    model = _model()
+    ft.prepare(model, None, None)
+    beat = json.loads(_beat_path(tmp_path).read_text())
+    assert beat["step"] == 0 and beat["device"] == "cpu"
