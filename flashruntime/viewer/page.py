@@ -2,7 +2,7 @@
 
 This is the single sanctioned large file of the viewer: a `flash.submit(
 watch=True)` opens it, and it polls `/api/state` (the `state.collect()`
-snapshot) every couple of seconds to draw one run's story — its topology,
+snapshot) every couple of seconds to draw one run's story — its process map,
 its loss curve, its checkpoints, and its recovery decisions — with ZERO
 external assets. No CDN, no web font fetch, no remote image: the page must
 render with the network cut, because the only server it may ever talk to is
@@ -438,12 +438,17 @@ function buildKpiTiles(s) {
   const verified = (s.checkpoints || []).filter((c) => c.validation === "hash_verified").length;
   const end = s.finished_at || Date.now() / 1000;
   const hint = m && m.limited ? "flashruntime[monitor]" : undefined;
+  // A derived rate is only honest while it is still current: once the run
+  // stalls or finishes, the last-computed stepsPerSec is a fabricated
+  // "current" number if we keep showing it. "Live" = RUNNING and the
+  // newest heartbeat is recent (~3 poll periods, POLL_MS=2000).
+  const rateLive = s.state === "RUNNING" && beat && (Date.now() / 1000 - beat.ts) < 6;
   const tiles = [
     { label: "state", value: s.state || "—", color: fmStateColor(s.state) },
     { label: "elapsed", value: fmtDur(end - s.started_at) },
     { label: "step", value: beat && beat.step != null ? String(beat.step) : "—" },
-    { label: "steps/s", value: stepsPerSec != null ? stepsPerSec.toFixed(2) : "—" },
-    { label: "step latency", value: stepsPerSec ? Math.round(1000 / stepsPerSec) + " ms" : "—" },
+    { label: "steps/s", value: rateLive && stepsPerSec != null ? stepsPerSec.toFixed(2) : "—" },
+    { label: "step latency", value: rateLive && stepsPerSec ? Math.round(1000 / stepsPerSec) + " ms" : "—" },
     { label: "cpu", value: m && m.cpu_percent != null ? Math.round(m.cpu_percent) + "%" : "—", hint: hint },
     { label: "memory", value: m && m.mem_used != null ? fmFmtBytes(m.mem_used) : "—", hint: hint },
     { label: "restarts", value: used + " / " + (s.max_restarts == null ? "?" : s.max_restarts) },

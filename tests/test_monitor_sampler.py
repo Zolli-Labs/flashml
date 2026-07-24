@@ -64,6 +64,17 @@ class _FakeProc:
 
 
 class _FakePsutil:
+    """`Process(pid)` memoizes per-pid so repeated calls with the same pid
+    return the SAME `_FakeProc` object — mirroring real psutil closely
+    enough for the cache-reuse behavior under test (a real `ps.Process(pid)`
+    is a fresh handle each call too; it's `ResourceSampler`/`_process_tree`
+    that is responsible for reusing instances across ticks, and this fake
+    needs stable identity per pid so the code under test can be observed
+    doing that)."""
+
+    def __init__(self):
+        self._procs: dict[int, _FakeProc] = {}
+
     def cpu_percent(self, interval=None):
         return 42.0
 
@@ -71,7 +82,15 @@ class _FakePsutil:
         return _FakeVm()
 
     def Process(self, pid):
-        return _FakeProc(pid, ppid=1, children=[_FakeProc(pid + 1, ppid=pid)])
+        if pid not in self._procs:
+            self._procs[pid] = _FakeProc(pid, ppid=1, children=[])
+        proc = self._procs[pid]
+        # keep the child wired up (children() reads live state each call)
+        child_pid = pid + 1
+        if child_pid not in self._procs:
+            self._procs[child_pid] = _FakeProc(child_pid, ppid=pid, children=[])
+        proc._children = [self._procs[child_pid]]
+        return proc
 
 
 class _RaisingPsutil:
@@ -125,17 +144,28 @@ def test_machine_sample_survives_raising_psutil(monkeypatch):
 
 def test_process_tree_with_psutil(monkeypatch):
     monkeypatch.setattr(sampler_mod, "_psutil", lambda: _FakePsutil())
-    procs = sampler_mod._process_tree(4000)
+    cache: dict = {}
+    # First sighting of every pid: cpu_percent is primed but reported as
+    # None (honest "no measurement yet"), never the fake first-call 0.0/12.5.
+    procs = sampler_mod._process_tree(4000, cache)
     assert [p["pid"] for p in procs] == [4000, 4001]
-    assert procs[0]["cpu_percent"] == 12.5
+    assert procs[0]["cpu_percent"] is None
+    assert procs[1]["cpu_percent"] is None
     assert procs[0]["rss_bytes"] == 123_000_000
     assert procs[1]["ppid"] == 4000
     assert procs[0]["cmd"] == "python train.py --x"
 
+    # Second tick, SAME cache: both pids are now cached, so this is a real
+    # delta reading (the fake keeps returning 12.5 — the point under test is
+    # that the None came from first-sighting, not from the fake's value).
+    procs2 = sampler_mod._process_tree(4000, cache)
+    assert procs2[0]["cpu_percent"] == 12.5
+    assert procs2[1]["cpu_percent"] == 12.5
+
 
 def test_process_tree_without_psutil(monkeypatch):
     monkeypatch.setattr(sampler_mod, "_psutil", lambda: None)
-    procs = sampler_mod._process_tree(4000)
+    procs = sampler_mod._process_tree(4000, {})
     assert procs == [
         {
             "pid": 4000,
@@ -151,7 +181,7 @@ def test_process_tree_without_psutil(monkeypatch):
 
 def test_process_tree_survives_raising_psutil(monkeypatch):
     monkeypatch.setattr(sampler_mod, "_psutil", lambda: _RaisingPsutil())
-    assert sampler_mod._process_tree(4000) == []  # degrade, never raise
+    assert sampler_mod._process_tree(4000, {}) == []  # degrade, never raise
 
 
 # ---- the sampler thread -----------------------------------------------------
@@ -172,6 +202,9 @@ def test_sampler_writes_at_least_one_sample(tmp_path, monkeypatch):
     assert set(sample) == {"ts", "machine", "processes"}
     assert sample["machine"]["cpu_percent"] == 42.0
     assert [p["pid"] for p in sample["processes"]] == [4000, 4001]
+    # first-ever tick: every process is a first sighting, so cpu_percent is
+    # honestly None rather than a fake 0.0/first-call value.
+    assert all(p["cpu_percent"] is None for p in sample["processes"])
 
 
 def test_sampler_stop_is_idempotent_and_fast(tmp_path, monkeypatch):
@@ -182,3 +215,17 @@ def test_sampler_stop_is_idempotent_and_fast(tmp_path, monkeypatch):
     s.stop()
     s.stop()  # second stop must be a no-op, not an error
     assert time.time() - t0 < 5  # never waits out the period
+
+
+def test_second_tick_reports_real_cpu(tmp_path, monkeypatch):
+    """The sampler's own `_procs` cache (not just a bare `_process_tree`
+    call) must persist across ticks: tick 1's processes are first sightings
+    (cpu_percent None), tick 2's are cache hits (a real 12.5 from the fake)."""
+    monkeypatch.setattr(sampler_mod, "_psutil", lambda: _FakePsutil())
+    s = ResourceSampler(tmp_path, root_pid=4000, period_s=30.0)
+    s._tick()
+    s._tick()
+    lines = _read_lines(tmp_path / "telemetry.jsonl")
+    assert len(lines) == 2
+    assert all(p["cpu_percent"] is None for p in lines[0]["processes"])
+    assert all(p["cpu_percent"] == 12.5 for p in lines[1]["processes"])

@@ -66,6 +66,13 @@ def _machine_sample() -> dict:
     ps = _psutil()
     if ps is not None:
         try:
+            # Like the per-process case, psutil's *first* call to the
+            # module-level `cpu_percent(interval=None)` in this process also
+            # returns a meaningless 0.0 — but psutil keeps that reference
+            # point as module state (not per-instance), so unlike
+            # `_process_tree` there is nothing for us to cache: it is
+            # correct from the second sampler tick onward. Accepted as one
+            # honest-enough tick of staleness at process start.
             sample["cpu_percent"] = ps.cpu_percent(interval=None)
             vm = ps.virtual_memory()
             sample["mem_total"] = vm.total
@@ -101,11 +108,23 @@ def _gpu_sample() -> list[dict]:
         return []
 
 
-def _process_tree(root_pid: int) -> list[dict]:
+def _process_tree(root_pid: int, cache: dict[int, object]) -> list[dict]:
     """The launched process and all its descendants (torchrun's ranks, a
     sweep's children), one dict per process. Without psutil we can still name
     the root pid (the launcher knows it); with a vanished/denied root we
-    return [] — the attempt likely just finished between ticks."""
+    return [] — the attempt likely just finished between ticks.
+
+    `cache` (pid -> psutil.Process) is caller-owned and reused across ticks.
+    psutil.Process.cpu_percent(interval=None) is only a meaningful delta on
+    the SECOND call for a given instance — its first call just resets the
+    internal reference point and returns a bogus 0.0. Creating a fresh
+    Process every tick (the old behavior) meant every sample lied "0%"; by
+    keeping one Process instance per live pid across ticks, the second and
+    later ticks report a real delta. A freshly-seen pid still gets its
+    cpu_percent primed here (so next tick's delta is real) but is reported
+    as `None` this tick — an honest "no measurement yet" instead of a fake
+    0.0.
+    """
     ps = _psutil()
     if ps is None:
         return [
@@ -120,27 +139,45 @@ def _process_tree(root_pid: int) -> list[dict]:
             }
         ]
     try:
-        root = ps.Process(root_pid)
+        # Reuse the cached root object (do NOT write it back to `cache` yet —
+        # the per-process loop below is the single place that decides
+        # first-sighting vs. cached, and pre-inserting here would make a
+        # brand-new root look "already cached" before it is ever measured).
+        root = cache.get(root_pid) or ps.Process(root_pid)
+        # Always re-walk children on the (possibly cached) root — new
+        # children can appear between ticks even though the root itself
+        # is unchanged.
         procs = [root] + root.children(recursive=True)
     except Exception:  # noqa: BLE001 — process gone / access denied
         return []
     out: list[dict] = []
+    live_pids: set[int] = set()
     for p in procs:
         try:
-            with p.oneshot():
+            first_sighting = p.pid not in cache
+            proc = cache.get(p.pid, p)
+            cache[p.pid] = proc
+            live_pids.add(proc.pid)
+            with proc.oneshot():
+                cpu = proc.cpu_percent(interval=None)
                 out.append(
                     {
-                        "pid": p.pid,
-                        "ppid": p.ppid(),
-                        "cmd": " ".join(p.cmdline()[:3]) or p.name(),
-                        "cpu_percent": p.cpu_percent(interval=None),
-                        "rss_bytes": p.memory_info().rss,
-                        "create_time": p.create_time(),
-                        "status": p.status(),
+                        "pid": proc.pid,
+                        "ppid": proc.ppid(),
+                        "cmd": " ".join(proc.cmdline()[:3]) or proc.name(),
+                        "cpu_percent": None if first_sighting else cpu,
+                        "rss_bytes": proc.memory_info().rss,
+                        "create_time": proc.create_time(),
+                        "status": proc.status(),
                     }
                 )
         except Exception:  # noqa: BLE001 — a process may exit mid-inspection
             continue
+    # Prune vanished processes so the cache never grows unbounded across a
+    # long-running attempt.
+    for pid in list(cache):
+        if pid not in live_pids:
+            del cache[pid]
     return out
 
 
@@ -159,6 +196,9 @@ class ResourceSampler:
         self.period_s = period_s
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # pid -> psutil.Process, reused across ticks so cpu_percent deltas
+        # are real (see _process_tree's docstring for why).
+        self._procs: dict[int, object] = {}
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -185,7 +225,7 @@ class ResourceSampler:
         sample = {
             "ts": time.time(),
             "machine": _machine_sample(),
-            "processes": _process_tree(self.root_pid),
+            "processes": _process_tree(self.root_pid, self._procs),
         }
         self.output_dir.mkdir(parents=True, exist_ok=True)
         with open(self.output_dir / "telemetry.jsonl", "a") as f:

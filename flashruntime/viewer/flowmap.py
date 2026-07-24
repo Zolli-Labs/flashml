@@ -16,6 +16,19 @@ The map draws machine → workers (attempts) → ranks as DOM nodes (free click
 targets + text layout) with one SVG layer behind them for the edges. It is
 rebuilt idempotently from each snapshot; `fmSelected` (the clicked node)
 survives rebuilds and feeds the slide-in detail panel with live values.
+
+Single-machine today, on purpose: the machine column renders exactly one
+node — the local viewer's reality, since `flash.submit(watch=True)` only
+ever observes the machine it is running on. Growing that to N machines for
+the coordinator dashboard (phase 3) is a change to THIS component — extend
+the machine column here so both surfaces gain it together, never fork a
+per-host copy of the flow map. Before that adoption lands, the coordinator
+dashboard also needs two host-page prerequisites it does not have yet: a
+`T` token global (the injected color-token object this JS reads, see
+`viewer/page.py`'s `%%tokens_json%%`) and a `%%token%%` substitution pass
+over its CSS — `service/dashboard.py`'s current `_recolor` hex pipeline is a
+different mechanism and must be reworked onto the same placeholder scheme
+before it can host this component.
 """
 
 from __future__ import annotations
