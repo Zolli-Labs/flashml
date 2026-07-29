@@ -104,8 +104,39 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   checkpoint/log_metrics/rank/world_size/is_main/start_step; wraps torch's
   own DDP and stops — ADR-0003 guardrail). Service-side command jobs expand
   + lease with fail-closed sandbox placement (`scheduler.IsolationAwarePlacement`);
-  **executing** the `argv` payload waits on flashnode's argv runner tier
-  (cross-repo). User-facing guide: `docs/guides/bring-your-code.md`.
+  **executing** the `argv` payload is wired end-to-end: flashnode's argv
+  runner tier (cross-repo, `flashnode work --runner argv`) runs the task's
+  argv inside a hardened, network-isolated container and commits the result.
+  User-facing guides: `docs/guides/bring-your-code.md` (job authors) and
+  `docs/guides/donate-a-machine.md` (volunteer node operators).
+- **Volunteer compute pool: argv runner tier** (July 2026, cross-repo):
+  any machine can join with `flashnode work --runner argv --coordinator
+  <URL>`, which requires a non-empty `FLASHNODE_ALLOWED_IMAGES` and refuses
+  to start otherwise (never degrades to an unsandboxed tier). Runs the
+  task's pinned image + argv inside `ArgvDockerRunner` with `--network none`,
+  `--read-only`, a `noexec,nosuid` `/tmp` tmpfs, non-root `--user`,
+  `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pids-limit`,
+  `--cpus`/`--memory` (`--memory-swap` pinned equal), and `--ulimit
+  nofile`; only the bound workdir (`/work`) is writable. Wall-clock timeout
+  kills the named container directly, not just the local `docker` client.
+  `argv_capable` is a new fail-closed field on `NodeRegistration` (not
+  `NodeCapabilities` — it is a runner posture, not a hardware fact);
+  `IsolationAwarePlacement` requires **both** `sandbox_capable` and
+  `argv_capable` before leasing a command task to a node, and the
+  `allowFallback` waiver cannot bypass that gate. `CommandRecipe` rejects
+  `isolation.tier != "sandboxed"` for command jobs (coordinator-side escape
+  hatch only: `FLASHML_ALLOW_UNSANDBOXED_ARGV=1`) — a submitter can never
+  downgrade their own isolation. The composite `(job_id, task_id)` lease key
+  (both `InMemoryLeaseStore` and `SqliteLeaseStore`, with an in-place SQLite
+  migration from the old single-column primary key) landed alongside this so
+  a multi-job volunteer pool doesn't collide two jobs' `task-000`. **Known
+  gaps, documented in `docs/guides/donate-a-machine.md`:** no result
+  verification (a lying node is currently believed), one shared join code,
+  container escape is not ruled out (shared host kernel), disk fill capped
+  only at upload time, no GPU probing, no coordinated multi-process training
+  on volunteer nodes, and the real-Docker integration tests are currently
+  skipped (no daemon in the dev environment) — the hardening is verified by
+  constructed-argv assertions, not yet by a live daemon.
 - **Automatic recovery in the SDK** (July 2026): `flash.submit(...,
   max_restarts=N)` turns a FAILED attempt into `FailureSignals`, calls
   `recovery.classify()`/`decide()`, and — unless the failure is a
@@ -142,9 +173,10 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   + GitHub Pages); `scripts/audit_secrets.sh` (worktree + history scan,
   CLEAN); `CONTRIBUTING.md` / `SECURITY.md` / `CHANGELOG.md`; PEP 561
   `py.typed`, built docs bundled in the wheel.
-- Tests: `pytest` → **264 passed, 1 skipped** (the CUDA-gated GPU test),
-  9 deselected (integration + bench_smoke, opt-in via `-m`; live in
-  `tests/integration/` with env auto-skip). Images: `deploy/docker/`.
+- Tests: `pytest` → **317 passed, 1 skipped** (the CUDA-gated GPU test),
+  20 deselected (integration + bench_smoke, opt-in via `-m`; live in
+  `tests/integration/` with env auto-skip). `flashnode`'s own suite:
+  **60 passed, 1 skipped**. Images: `deploy/docker/`.
   Full-loop proof: workspace-root `e2e/` (`make e2e`, `make e2e-demo`) +
   in-repo `tests/test_examples_e2e.py` (4 real bring-your-code e2e tests,
   incl. kill-at-40 → auto-resume, final loss matching baseline to 1e-6).
@@ -165,7 +197,11 @@ optional `flashruntime.torch` helper; automatic SDK recovery (`max_restarts`
 PyTorch-style docs site (built + served at `/docs` + Pages-ready); honest
 benchmark suite + measured M4 baseline; CI matrix + test-gated trusted
 publishing + secrets audit CLEAN; real-GPU validation (2×RTX 4090, nccl,
-$0.0725). Earlier local-milestone core still stands: Mode A lease
+$0.0725); volunteer compute pool argv runner tier (cross-repo — any machine
+can join with `flashnode work --runner argv`, executing arbitrary
+sandboxed argv inside a hardened, network-isolated container, gated by a
+composite `(job_id, task_id)` lease key and the `argv_capable` placement
+gate). Earlier local-milestone core still stands: Mode A lease
 coordinator over HTTP (claim/heartbeat/complete/fail; commit-time sha256
 validation; join-code registration; artifact size caps); durable
 `SqliteLeaseStore` (in-flight leases survive restarts); job→task expansion
@@ -178,28 +214,31 @@ cross-machine resume). Suite: **237 passed, 1 skipped, 9 deselected**.
 1. **Multi-node DDP rendezvous** — `nnodes > 1` in the pytorch adapter
    raises `NotImplementedError` today; single-node (`--standalone`) is the
    proven path. GPU is validated single-node; multi-node GPU rendezvous is
-   a later launcher slice.
-2. **FlashNode argv runner** (cross-repo): service-side command jobs expand
-   + lease + placement-check today, but *executing* the `argv` payload
-   waits on flashnode's argv runner tier.
-3. **Checkpoint-manifest persistence** — catalog is in-memory; checkpoint
+   a later launcher slice. Not planned for volunteer nodes at all — see
+   `docs/guides/donate-a-machine.md`.
+2. **Checkpoint-manifest persistence** — catalog is in-memory; checkpoint
    *files* are durable, so manifests die with the coordinator.
-4. **Stage-8 ledger metrics** (MTTD/MTTR/goodput/lost-work) + case study —
+3. **Stage-8 ledger metrics** (MTTD/MTTR/goodput/lost-work) + case study —
    every needed event already exists.
-5. Service-side recovery wiring — the SDK path fires classify/decide +
+4. Service-side recovery wiring — the SDK path fires classify/decide +
    FAILURE_CLASSIFIED / RECOVERY_ACTION_SELECTED, but the *coordinator*
    still recovers via implicit lease-expiry.
-6. `flash.run(plan)` — planner and executor exist but aren't linked (raises
+5. `flash.run(plan)` — planner and executor exist but aren't linked (raises
    `NotImplementedError`); e2e plans then builds the JobSpec by hand.
-7. Cloud stage: Postgres (same append-only schema), SSE instead of
+6. Cloud stage: Postgres (same append-only schema), SSE instead of
    polling, ACK/KubeRay hybrid pool, HF Trainer + PEFT LoRA recipes on the
    sgd_trainer checkpoint contract.
+7. **Volunteer-pool trust hardening** — per-node identity replacing the
+   shared join code (slice B), result verification for untrusted nodes
+   (slice C), GPU capability probing (slice D), and real-Docker
+   verification of the sandbox flags (the integration tests are written but
+   currently skip for lack of a Docker daemon in the dev environment).
 
 ## Dev workflow
 
 ```bash
 uv venv && uv pip install -e ".[sklearn,dev]"
-pytest                    # 264 passed, 1 skipped (CUDA-gated), 9 deselected
+pytest                    # 317 passed, 1 skipped (CUDA-gated), 20 deselected
                           #   (+ opt-in: pytest -m integration / -m bench_smoke)
 ```
 

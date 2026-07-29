@@ -20,6 +20,28 @@ The contract at the boundary is deliberately thin: **CLI flags in,
 imports to be operated. This is ADR-0003's fourth axis in practice: **recipes
 integrate user code**; the distributed math is always done by your framework.
 
+## Volunteer nodes run with no network
+
+> **Jobs placed on volunteer nodes run with no network.** Your command cannot
+> `pip install`, download a dataset, or pull from HuggingFace once it starts.
+> Everything must be baked into the pinned image, or passed as an
+> `artifact://` input that the agent stages at `/work/inputs/` **before**
+> your code starts. Write outputs to `/work/out/`; `metrics.json` is
+> required there — it is the artifact the coordinator validates by sha256 at
+> commit time, so a task that doesn't produce it cannot commit.
+>
+> `mode: "coordinated"` (torchrun/DDP-style rank rendezvous) is **not
+> available on volunteer nodes** — with no network, ranks have no way to find
+> each other. Volunteer pools run independent tasks only (sweeps, sharded
+> work); route anything that needs coordinated multi-process training to
+> owned or trusted nodes instead.
+
+This constraint exists because volunteer nodes are strangers' hardware,
+sandboxed with `--network none` so a job you didn't write can't use a
+volunteer's machine to reach the internet. See
+[donate-a-machine.md](donate-a-machine.md) for the volunteer's side of that
+trade — what the sandbox does and does not guarantee.
+
 ## Where the content went
 
 The documentation site (built by `scripts/build_docs.py`, served at `/docs`

@@ -66,17 +66,20 @@ isolate it. That is the intended behavior: unsafe placement fails closed.
 > 2-process CPU DDP (via `gloo`), and kill-and-resume from checkpoints on this
 > machine. All three are proven by the example e2e tests.
 >
-> **Service-side command jobs — expansion works, execution pending.** POSTing a
-> `to_jobspec()` workload expands it into leased tasks and places them
-> fail-closed by isolation tier (proven by the service command-recipe tests).
-> But **running** an `argv` payload needs FlashNode's argv runner tier, a
-> cross-repo, versioned change that has not landed yet. Until it ships, command
-> jobs *expand and lease* correctly but only an argv-aware executor can execute
-> them.
+> **Service-side command jobs — expansion, placement, and execution all
+> work.** POSTing a `to_jobspec()` workload expands it into leased tasks,
+> places them fail-closed by isolation tier, and — with a FlashNode agent
+> running `--runner argv` — executes the `argv` payload inside a hardened,
+> network-isolated container and commits the result. `sandboxed` tasks are
+> only ever placed on a node that advertises both `sandbox_capable` and
+> `argv_capable`; see the repo's `docs/guides/donate-a-machine.md` for exactly
+> what that container confines (and does not).
 >
-> **Later slices.** Multi-node DDP (`nnodes > 1` rendezvous), remote providers
-> (RunPod) with source packaging (`git_revision`), and `flash.run(StrategyPlan)`
-> wiring are open follow-ups.
+> **Later slices.** Multi-node DDP (`nnodes > 1` rendezvous — not available on
+> volunteer nodes even later, since `--network none` rules out rendezvous),
+> result verification for untrusted volunteer nodes, remote providers
+> (RunPod) with source packaging (`git_revision`), and
+> `flash.run(StrategyPlan)` wiring are open follow-ups.
 
 For how a leased task recovers when a node disappears, see the
 [fault-tolerance tutorial](../tutorials/fault-tolerance.md) and the
