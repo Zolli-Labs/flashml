@@ -70,7 +70,7 @@ This slice ships the flashnode half.
 - **No new coordinator endpoints, and no change to the task payload contract** —
   `CommandRecipe` already emits everything the runner needs. The one
   wire-visible change is a single additive, fail-closed field on
-  `NodeCapabilities` (registration only); see Architecture §4.
+  `NodeRegistration` (registration only); see Architecture §4.
 - **No GPU passthrough.** `--network none` plus no `--device` flags; GPU work on
   volunteer nodes waits on slice D.
 
@@ -241,10 +241,19 @@ project's isolation stance.
 ### 4. Protocol: one new field
 
 ```python
-class NodeCapabilities(BaseModel):
+class NodeRegistration(BaseModel):
+    ...
+    capabilities: NodeCapabilities
+    environment: NodeEnvironment = NodeEnvironment.LOCAL
     sandbox_capable: bool = False
     argv_capable: bool = False     # NEW - fail closed
 ```
+
+The field goes on **`NodeRegistration`**, beside the existing
+`sandbox_capable` — *not* on `NodeCapabilities`, which carries only hardware
+facts (cpu/memory/gpus/os/arch). The claim handler builds its `NodeView` from
+the registration (`service/modea.py:295`), so the new field must be added to
+that dict alongside `sandbox_capable` or the placement gate will never see it.
 
 A node running the *module* `DockerRunner` is genuinely sandbox-capable but
 cannot execute argv; overloading `sandbox_capable` would let the coordinator
