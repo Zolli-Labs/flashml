@@ -64,3 +64,34 @@ def test_argv_capable_defaults_false():
 def test_argv_capable_when_requested():
     reg = discover("node-1", kubernetes_node="", node_meta=None, argv_capable=True)
     assert reg.argv_capable is True
+
+
+def test_argv_capable_implies_sandbox_capable(monkeypatch):
+    # ArgvDockerRunner is container-only by construction — there is no
+    # unsandboxed way to run it — so a node advertising argv_capable must
+    # also advertise sandbox_capable, or the coordinator's tier gate for
+    # `tier: "sandboxed"` command tasks will never let it claim work.
+    monkeypatch.delenv("FLASHNODE_SANDBOX_CAPABLE", raising=False)
+    reg = discover("node-1", kubernetes_node="", node_meta=None, argv_capable=True)
+    assert reg.sandbox_capable is True
+
+
+def test_argv_incapable_node_keeps_sandbox_capable_false(monkeypatch):
+    # No regression: without argv and without the env/label sources, a node
+    # must not be advertised as sandbox-capable.
+    monkeypatch.delenv("FLASHNODE_SANDBOX_CAPABLE", raising=False)
+    reg = discover("node-1", kubernetes_node="", node_meta=None, argv_capable=False)
+    assert reg.sandbox_capable is False
+
+
+def test_env_and_label_sandbox_capable_still_work_without_argv(monkeypatch):
+    # The existing env-var and label paths must still set sandbox_capable
+    # when argv_capable is False (e.g. --runner docker on a sandboxed host).
+    monkeypatch.setenv("FLASHNODE_SANDBOX_CAPABLE", "true")
+    reg = discover("node-1", kubernetes_node="", node_meta=None, argv_capable=False)
+    assert reg.sandbox_capable is True
+
+    monkeypatch.delenv("FLASHNODE_SANDBOX_CAPABLE", raising=False)
+    node_meta = {"metadata": {"labels": {"flashml.dev/sandbox-capable": "true"}}}
+    reg = discover("node-1", kubernetes_node="", node_meta=node_meta, argv_capable=False)
+    assert reg.sandbox_capable is True

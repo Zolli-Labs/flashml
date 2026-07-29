@@ -78,6 +78,12 @@ def discover(node_id: str, kubernetes_node: str,
     sandbox_capable = (
         os.environ.get("FLASHNODE_SANDBOX_CAPABLE", "").lower() == "true"
         or labels.get("flashml.dev/sandbox-capable") == "true"
+        # ArgvDockerRunner is container-only by construction — there is no
+        # unsandboxed code path — so argv capability implies sandbox
+        # capability. This is deliberately asymmetric with --runner docker
+        # (DockerRunner does not imply sandboxing on its own): widening that
+        # path is a separate judgment call, not an oversight here.
+        or argv_capable
     )
 
     from flashnode import __version__
