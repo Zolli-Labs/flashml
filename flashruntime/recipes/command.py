@@ -11,6 +11,7 @@ executors can run them.
 
 from __future__ import annotations
 
+import os
 from typing import Any, ClassVar
 
 from flashruntime.protocol.v1alpha1 import JobSpec, TaskSpec
@@ -44,6 +45,24 @@ class CommandRecipe(WorkloadRecipe):
         return problems
 
     def expand(self, job_id: str, spec: JobSpec) -> list[TaskSpec]:
+        isolation_spec = spec.spec.isolation
+        if isolation_spec.allowFallback:
+            # allowFallback waives the sandbox capability requirement at
+            # placement time. Honouring it for argv would let a submitter
+            # place arbitrary code on an unsandboxed node.
+            raise ValueError(
+                "command jobs may not set isolation.allowFallback — "
+                "argv execution is container-only"
+            )
+        if isolation_spec.tier != "sandboxed":
+            # Coordinator-side opt-in only: the operator running the pool
+            # decides, never the submitter.
+            if os.environ.get("FLASHML_ALLOW_UNSANDBOXED_ARGV") != "1":
+                raise ValueError(
+                    f"command jobs require isolation.tier 'sandboxed', got "
+                    f"{isolation_spec.tier!r} (set FLASHML_ALLOW_UNSANDBOXED_ARGV=1 "
+                    f"on the coordinator to allow a trusted fleet)"
+                )
         p = spec.spec.workload.parameters
         problems = self.validate_params(p)
         if problems:

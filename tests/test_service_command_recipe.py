@@ -10,7 +10,13 @@ def _jobspec(**over):
     from flashruntime.protocol.v1alpha1 import ImageSpec, IsolationSpec
     from flashruntime.workloads.command import CommandWorkload, to_jobspec
 
-    defaults = dict(command="python train.py --lr {lr}", task_params=[{"lr": 0.1}, {"lr": 0.01}])
+    # sandboxed is the only posture command jobs may submit with; tests that
+    # aren't about isolation itself still need a valid default to expand.
+    defaults = dict(
+        command="python train.py --lr {lr}",
+        task_params=[{"lr": 0.1}, {"lr": 0.01}],
+        isolation=IsolationSpec(tier="sandboxed"),
+    )
     defaults.update(over)
     wl = CommandWorkload(**defaults)
     return to_jobspec(wl, name="cmd-job", image=ImageSpec(repository="ghcr.io/me/img", tag="1.0"))
