@@ -645,11 +645,19 @@ def _payload(**over):
     return base
 
 
-@pytest.mark.parametrize("bad", [{}, {"argv": []}, {"argv": "python train.py"}, {"argv": [1, 2]}])
+_MISSING = object()   # distinct from every legitimate-but-invalid argv value
+
+
+@pytest.mark.parametrize("bad", [_MISSING, None, [], "python train.py", [1, 2]])
 def test_bad_argv_refused_before_any_subprocess(tmp_path, bad):
+    payload = _payload()
+    if bad is _MISSING:
+        payload.pop("argv")          # payload carrying no argv key at all
+    else:
+        payload["argv"] = bad        # present but malformed
     with mock.patch("subprocess.run") as run:
         with pytest.raises(TaskExecutionError):
-            _runner().run(_payload(**bad), tmp_path, {})
+            _runner().run(payload, tmp_path, {})
     run.assert_not_called()      # a check that runs after launching is not a check
 
 
