@@ -103,6 +103,26 @@ def test_unregistered_node_cannot_claim(client):
     assert client.post("/v1alpha1/leases/claim", json={"node_id": "ghost"}).status_code == 403
 
 
+def test_node_view_exposes_argv_capable(client):
+    """GET /v1alpha1/nodes must surface argv_capable — the argv placement
+    gate (scheduler.IsolationAwarePlacement) and the dashboard both read it
+    from the node view, not just the claim-time node dict."""
+    r = client.post(
+        "/v1alpha1/nodes/register",
+        json={
+            "node_id": "n1",
+            "kubernetes_node": "",
+            "hostname": "n1.local",
+            "capabilities": {"cpu_cores": 8, "memory_bytes": 16_000_000_000},
+            "environment": "local",
+            "argv_capable": True,
+        },
+    )
+    assert r.status_code == 200
+    nodes = client.get("/v1alpha1/nodes").json()
+    assert nodes[0]["argv_capable"] is True
+
+
 def test_expansion_errors_are_422(client):
     r = client.post(
         "/v1alpha1/jobs",

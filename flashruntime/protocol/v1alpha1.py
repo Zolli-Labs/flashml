@@ -285,6 +285,10 @@ class NodeRegistration(BaseModel):
     capabilities: NodeCapabilities
     environment: NodeEnvironment = NodeEnvironment.LOCAL
     sandbox_capable: bool = False
+    #: This node runs an argv-capable sandboxed runner. Defaults False so
+    #: every already-deployed agent is excluded from argv work until it is
+    #: upgraded and explicitly opted in (security fields fail closed).
+    argv_capable: bool = False
     pool: str = "local"
     runtime_profile: str = "kubernetes"
     labels: dict[str, str] = Field(default_factory=dict)

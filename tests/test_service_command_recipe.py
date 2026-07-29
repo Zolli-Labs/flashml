@@ -109,6 +109,11 @@ def test_claim_endpoint_fails_closed_for_sandboxed_tasks():
                 "hostname": node_id,
                 "capabilities": {},
                 "sandbox_capable": sandbox,
+                # Command tasks carry an argv payload, which gates on its own
+                # capability independent of sandbox_capable (see
+                # scheduler.IsolationAwarePlacement) — a capable node here
+                # needs both flags to be leasable.
+                "argv_capable": sandbox,
             },
         )
         assert r.status_code == 200

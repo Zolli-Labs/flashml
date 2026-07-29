@@ -111,9 +111,22 @@ class IsolationAwarePlacement(PlacementPolicy):
       treated like ``"sandboxed"`` and requires capability — no silent
       downgrade to unsandboxed placement.
 
+    A second, independent gate applies to tasks carrying an `argv` payload
+    (arbitrary user command lines): the claiming node must advertise
+    `argv_capable is True`. This is checked BEFORE the isolation block's
+    `allowFallback` waiver below, and the waiver does not apply to it — a
+    submitter setting `allowFallback: true` waives the sandbox-tier
+    requirement only, never the argv-runner requirement, or arbitrary argv
+    could land on a node with no argv runner at all.
+
     Everything genuinely standard keeps the fail-open placement default."""
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
+        # Checked before the allowFallback waiver below: the waiver relaxes
+        # the sandbox-tier requirement, and must never be readable as
+        # permission to run argv on a node with no argv runner.
+        if "argv" in task.payload and node.get("argv_capable") is not True:
+            return False
         isolation = task.payload.get("isolation")
         if isolation is None:
             return True  # no isolation payload ⇒ standard, runs anywhere

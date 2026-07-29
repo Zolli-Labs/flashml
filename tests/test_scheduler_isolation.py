@@ -3,6 +3,8 @@ sandboxed tasks go only to sandbox_capable nodes (AGENTS.md rule 3)."""
 
 from __future__ import annotations
 
+import pytest
+
 
 def _task(task_id: str, tier: str | None = None, allow_fallback: bool = False):
     from flashruntime.protocol.v1alpha1 import TaskSpec
@@ -151,3 +153,54 @@ def test_claim_with_foreign_spec_policy_returns_none():
     mgr = LeaseManager()
     mgr.add_task(_task("real"))
     assert mgr.claim("n1", policy=ForeignSpecPolicy(), node={"node_id": "n1"}) is None
+
+
+# -- argv gate: volunteer compute pool (untrusted argv execution) -------------
+
+
+def _argv_task():
+    from flashruntime.protocol.v1alpha1 import TaskSpec
+
+    return TaskSpec(
+        task_id="task-000", job_id="job-a", commit_key="job-a/task-000/m.json",
+        payload={"argv": ["python", "train.py"],
+                 "isolation": {"tier": "sandboxed", "allowFallback": False}},
+    )
+
+
+@pytest.mark.parametrize("value", [None, False, "true", 1, "yes"])
+def test_argv_task_ineligible_without_genuine_true(value):
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    node = {"node_id": "n1", "sandbox_capable": True}
+    if value is not None:
+        node["argv_capable"] = value
+    assert IsolationAwarePlacement().eligible(_argv_task(), node) is False
+
+
+def test_argv_task_eligible_on_capable_node():
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    node = {"node_id": "n1", "sandbox_capable": True, "argv_capable": True}
+    assert IsolationAwarePlacement().eligible(_argv_task(), node) is True
+
+
+def test_allow_fallback_cannot_bypass_the_argv_gate():
+    """allowFallback waives the sandbox capability requirement. It must not
+    also waive argv capability, or a submitter could land arbitrary argv on
+    a node with no argv runner at all."""
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    task = _argv_task()
+    task.payload["isolation"]["allowFallback"] = True
+    node = {"node_id": "n1", "sandbox_capable": False}
+    assert IsolationAwarePlacement().eligible(task, node) is False
+
+
+def test_non_argv_tasks_are_unaffected():
+    from flashruntime.protocol.v1alpha1 import TaskSpec
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    task = TaskSpec(task_id="t", job_id="j", commit_key="j/t/m.json",
+                    payload={"module": "flashml_workloads.sklearn_trial"})
+    assert IsolationAwarePlacement().eligible(task, {"node_id": "n1"}) is True
