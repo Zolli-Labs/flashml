@@ -18,12 +18,32 @@ from __future__ import annotations
 
 import re
 import subprocess
+import uuid
 from pathlib import Path
 
 from flashnode.executor.hardening import CONTAINER_WORKDIR, harden_args
 from flashnode.executor.runner import TaskExecutionError
 
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*. We prefix
+# with "flashnode-" (always alnum-first) so the sanitized task_id segment
+# only has to avoid illegal characters, not worry about its own leading
+# character.
+_NAME_ILLEGAL = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _container_name(task_id: object) -> str:
+    """A Docker-legal, collision-resistant name for this attempt's container.
+
+    task_id comes from an untrusted payload — sanitize it into the name
+    rather than interpolating it raw. A random suffix (not task_id alone)
+    guarantees uniqueness even when two concurrent attempts share a task_id
+    (e.g. a retried attempt racing a slow-to-expire prior one).
+    """
+    safe = _NAME_ILLEGAL.sub("-", str(task_id or ""))
+    suffix = uuid.uuid4().hex[:8]
+    return f"flashnode-{safe}-{suffix}" if safe else f"flashnode-{suffix}"
 
 
 class ArgvDockerRunner:
@@ -62,8 +82,9 @@ class ArgvDockerRunner:
         outdir = workdir / "out"
         outdir.mkdir(parents=True, exist_ok=True)
 
+        name = _container_name(payload.get("task_id"))
         command = [
-            "docker", "run", "--rm",
+            "docker", "run", "--rm", "--name", name,
             *harden_args(workdir, cpus=self.cpus, memory_gb=self.memory_gb),
             *env_args,
             image,          # argv follows the image, where docker treats it
@@ -74,6 +95,15 @@ class ArgvDockerRunner:
                 command, capture_output=True, timeout=self.timeout_seconds, check=False
             )
         except subprocess.TimeoutExpired:
+            # subprocess.run's timeout kills the docker CLIENT process, not
+            # the daemon-side container — it keeps running unless we kill it
+            # by name ourselves. Best-effort: the container may already be
+            # gone by the time we ask, and either way the wall-clock error
+            # below is what the caller needs to see, not a kill failure.
+            try:
+                subprocess.run(["docker", "kill", name], capture_output=True, timeout=10, check=False)
+            except Exception:
+                pass
             raise TaskExecutionError(f"task exceeded {self.timeout_seconds}s wall clock")
         if proc.returncode != 0:
             tail = proc.stderr.decode(errors="replace")[-800:]
