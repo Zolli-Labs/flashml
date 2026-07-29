@@ -16,13 +16,11 @@ spec.json is written with *container* paths, not host paths.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
+from flashnode.executor.hardening import CONTAINER_WORKDIR, harden_args
 from flashnode.executor.runner import DEFAULT_ALLOWED_MODULES, TaskExecutionError
-
-CONTAINER_WORKDIR = "/work"
 
 
 class DockerRunner:
@@ -69,14 +67,7 @@ class DockerRunner:
 
         argv = [
             "docker", "run", "--rm",
-            "--network", "none",
-            "--cpus", str(self.cpus),
-            "--memory", f"{self.memory_gb}g",
-            "--read-only",
-            "--tmpfs", "/tmp",
-            "--user", f"{os.getuid()}:{os.getgid()}",
-            "-v", f"{workdir}:{CONTAINER_WORKDIR}",
-            "-w", CONTAINER_WORKDIR,
+            *harden_args(workdir, cpus=self.cpus, memory_gb=self.memory_gb),
             image,
             "python", "-m", module,
             "--spec", f"{CONTAINER_WORKDIR}/spec.json",
