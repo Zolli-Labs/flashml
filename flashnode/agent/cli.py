@@ -50,30 +50,46 @@ def _work(args: list[str]) -> int:
     )
     parser.add_argument(
         "--runner",
-        choices=["subprocess", "docker"],
+        choices=["subprocess", "docker", "argv"],
         default=os.environ.get("FLASHNODE_RUNNER", "subprocess"),
-        help="task execution tier (docker needs FLASHNODE_ALLOWED_IMAGES)",
+        help="task execution tier (docker/argv need FLASHNODE_ALLOWED_IMAGES)",
     )
     parser.add_argument("--max-tasks", type=int, default=None)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     opts = parser.parse_args(args)
 
     runner = None
-    if opts.runner == "docker":
+    if opts.runner in ("docker", "argv"):
+        # Shared by both sandboxed tiers: neither may start against an empty
+        # allowlist, so the check is hoisted here rather than duplicated per
+        # branch.
         images = frozenset(
             i.strip() for i in os.environ.get("FLASHNODE_ALLOWED_IMAGES", "").split(",") if i.strip()
         )
         if not images:
             print(
-                "flashnode work: --runner docker requires FLASHNODE_ALLOWED_IMAGES "
+                f"flashnode work: --runner {opts.runner} requires FLASHNODE_ALLOWED_IMAGES "
                 "(comma-separated image references) — refusing to start with an "
                 "empty allowlist",
                 file=sys.stderr,
             )
             return 2
-        from flashnode.executor.docker_runner import DockerRunner
+        if opts.runner == "docker":
+            from flashnode.executor.docker_runner import DockerRunner
 
-        runner = DockerRunner(allowed_images=images)
+            runner = DockerRunner(allowed_images=images)
+        else:
+            from flashnode.executor.argv_runner import ArgvDockerRunner
+
+            runner = ArgvDockerRunner(
+                allowed_images=images,
+                cpus=float(os.environ.get("FLASHNODE_MAX_CPUS", "2.0")),
+                memory_gb=float(os.environ.get("FLASHNODE_MAX_MEMORY_GB", "2.0")),
+                timeout_seconds=float(os.environ.get("FLASHNODE_TASK_TIMEOUT_S", "3600")),
+                max_output_bytes=int(
+                    os.environ.get("FLASHNODE_MAX_OUTPUT_BYTES", str(2 * 1024**3))
+                ),
+            )
 
     workdir_base = os.environ.get("FLASHNODE_WORKDIR") or None
 
@@ -81,7 +97,10 @@ def _work(args: list[str]) -> int:
     client = CoordinatorClient(
         opts.coordinator, join_code=os.environ.get("FLASHNODE_JOIN_CODE") or None
     )
-    registration = discover(node_id, kubernetes_node="", node_meta=None)
+    registration = discover(
+        node_id, kubernetes_node="", node_meta=None,
+        argv_capable=(opts.runner == "argv"),
+    )
     client.register(registration)
     loop = ExecutorLoop(
         client, node_id, runner=runner,

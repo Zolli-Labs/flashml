@@ -70,3 +70,11 @@ def test_heartbeat_and_graceful_termination(monkeypatch, tmp_path):
 def test_heartbeat_failure_is_reported_not_raised(monkeypatch, tmp_path):
     agent = make_agent(monkeypatch, tmp_path, 1)  # nothing listens on port 1
     assert agent.heartbeat_once() is False
+
+
+def test_argv_runner_requires_an_image_allowlist(monkeypatch, capsys):
+    """Refuse to start rather than silently degrade to an unsandboxed tier."""
+    from flashnode.agent.cli import main
+    monkeypatch.delenv("FLASHNODE_ALLOWED_IMAGES", raising=False)
+    assert main(["work", "--runner", "argv"]) == 2
+    assert "FLASHNODE_ALLOWED_IMAGES" in capsys.readouterr().err

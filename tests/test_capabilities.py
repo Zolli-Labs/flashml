@@ -54,3 +54,13 @@ def test_discover_degrades_without_kubernetes(monkeypatch):
     assert reg.capabilities.memory_bytes and reg.capabilities.memory_bytes > 0
     assert reg.sandbox_capable is False
     assert reg.capabilities.gpus == []  # never guessed
+
+
+def test_argv_capable_defaults_false():
+    reg = discover("node-1", kubernetes_node="", node_meta=None)
+    assert reg.argv_capable is False
+
+
+def test_argv_capable_when_requested():
+    reg = discover("node-1", kubernetes_node="", node_meta=None, argv_capable=True)
+    assert reg.argv_capable is True
