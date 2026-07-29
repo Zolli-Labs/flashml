@@ -127,19 +127,8 @@ def _docker_available() -> bool:
         return False
 
 
-@pytest.fixture()
-def docker_workdir():
-    """A workdir the Docker VM can actually see. On macOS, colima/Docker
-    Desktop only share $HOME by default — pytest's /var/folders tmp dir
-    bind-mounts as an EMPTY directory inside the VM. Same constraint applies
-    to real devices: ExecutorLoop's workdir_base / FLASHNODE_WORKDIR exists
-    for exactly this reason."""
-    import uuid
-
-    base = Path.home() / ".cache" / "flashnode-tests" / uuid.uuid4().hex[:8]
-    base.mkdir(parents=True)
-    yield base
-    shutil.rmtree(base, ignore_errors=True)
+# docker_workdir fixture: see tests/conftest.py — it is shared with
+# tests/integration/ rather than redefined here.
 
 
 @pytest.mark.skipif(not _docker_available(), reason="no reachable Docker daemon")
