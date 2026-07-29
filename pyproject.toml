@@ -27,3 +27,12 @@ Homepage = "https://github.com/Zolli-Labs/flashnode"
 
 [tool.setuptools.packages.find]
 include = ["flashnode*"]
+
+[tool.pytest.ini_options]
+# Unit tests run everywhere with zero infrastructure. Integration tests
+# (tests/integration/) need a real Docker daemon and are opt-in:
+# pytest -m integration
+addopts = "-m 'not integration'"
+markers = [
+    "integration: needs a real docker daemon; excluded by default, run with -m integration",
+]
