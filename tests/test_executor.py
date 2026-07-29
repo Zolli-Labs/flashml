@@ -172,6 +172,13 @@ def fake_module(tmp_path, monkeypatch):
     return "fake_workloads.echo_trial"
 
 
+def test_subprocess_runner_refuses_argv_payloads(tmp_path):
+    """Tier 1 is not a security boundary. An argv payload reaching it would
+    be arbitrary code execution on the host with no isolation at all."""
+    with pytest.raises(TaskExecutionError, match="argv"):
+        SubprocessRunner().run({"argv": ["python", "evil.py"]}, tmp_path, {})
+
+
 def test_runner_refuses_unlisted_module(tmp_path):
     runner = SubprocessRunner()
     with pytest.raises(TaskExecutionError, match="not allowlisted"):

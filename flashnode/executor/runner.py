@@ -2,8 +2,9 @@
 
 Tier 1 — `SubprocessRunner` (this file, dev/trusted profile): runs an
 **allowlisted Python module** in a fresh subprocess with a wall-clock
-timeout and an isolated working directory. Suitable for the local loop and
-trusted pools; it is not a security boundary against malicious code.
+timeout and an isolated working directory. Refuses argv payloads (which would
+run unsandboxed on the host). Suitable for the local loop and trusted pools;
+it is not a security boundary against malicious code.
 
 Tier 2 — Docker (`docker run` with cpu/memory limits, `--network none`,
 non-root, read-only rootfs, image allowlist) implements this same
@@ -57,6 +58,15 @@ class SubprocessRunner:
           argv       ← python -m <module> --spec spec.json --out out/
           outputs    → files written under out/ (metrics.json required)
         """
+        # Tier 1 has no isolation, so it must never execute a caller-supplied
+        # command line. Argv workloads are container-only (ArgvDockerRunner);
+        # refusing here keeps a misrouted payload from silently running
+        # unsandboxed on the host.
+        if "argv" in payload:
+            raise TaskExecutionError(
+                "argv payloads require a sandboxed runner — "
+                "start the agent with --runner argv"
+            )
         module = payload.get("module", "")
         if module not in self.allowed_modules:
             raise TaskExecutionError(f"module {module!r} is not allowlisted — refusing to run")
