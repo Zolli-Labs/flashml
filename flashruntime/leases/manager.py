@@ -73,8 +73,8 @@ class LeaseManager:
         self._store.add(TaskRecord(spec))
         self._emit(EventType.TASK_CREATED, spec.job_id, spec.task_id, now=now)
 
-    def cancel_task(self, task_id: str, now: datetime | None = None) -> None:
-        record = self._require(task_id)
+    def cancel_task(self, job_id: str, task_id: str, now: datetime | None = None) -> None:
+        record = self._require(job_id, task_id)
         if record.state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED):
             return  # terminal states are final; cancel is idempotent
         record.state = TaskState.CANCELLED
@@ -111,7 +111,17 @@ class LeaseManager:
             if chosen is not None:
                 # default None: a policy that returns a foreign/unknown spec
                 # falls through to the `record is None` path below, not StopIteration.
-                record = next((r for r in pending if r.spec.task_id == chosen.task_id), None)
+                # Match on both fields: task_id alone is positional within a
+                # job (task-000), so two jobs can collide on it.
+                record = next(
+                    (
+                        r
+                        for r in pending
+                        if r.spec.task_id == chosen.task_id
+                        and r.spec.job_id == chosen.job_id
+                    ),
+                    None,
+                )
         if record is None:
             return None
         record.attempts_used += 1
@@ -277,10 +287,10 @@ class LeaseManager:
             and record.state == TaskState.LEASED
         )
 
-    def _require(self, task_id: str) -> TaskRecord:
-        record = self._store.get(task_id)
+    def _require(self, job_id: str, task_id: str) -> TaskRecord:
+        record = self._store.get(job_id, task_id)
         if record is None:
-            raise LeaseError(f"unknown task {task_id}")
+            raise LeaseError(f"unknown task {task_id} in job {job_id}")
         return record
 
     def _find_lease(self, lease_id: str) -> tuple[TaskRecord, Lease]:

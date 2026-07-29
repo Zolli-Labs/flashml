@@ -368,7 +368,7 @@ def create_app(settings: RuntimeSettings | None = None) -> FastAPI:
             return job
         if job.backend == "leases":
             for record in lease_manager.records(job_id):
-                lease_manager.cancel_task(record.spec.task_id)
+                lease_manager.cancel_task(record.spec.job_id, record.spec.task_id)
         if job.runtime_execution_id:
             await backend.cancel(job.runtime_execution_id)
         watcher = app.state.watchers.pop(job_id, None)

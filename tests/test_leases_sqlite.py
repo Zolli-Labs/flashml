@@ -8,12 +8,15 @@ honorable after it.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
 from flashruntime.leases import LeaseManager
 from flashruntime.leases.sqlite_store import SqliteLeaseStore
+from flashruntime.leases.store import TaskRecord
 from flashruntime.protocol.v1alpha1 import TaskSpec, TaskState
 from flashruntime.service.app import RuntimeSettings, create_app
 
@@ -22,6 +25,25 @@ T0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
 
 def _task(task_id="t1", job_id="j1"):
     return TaskSpec(task_id=task_id, job_id=job_id, commit_key=f"{job_id}/{task_id}", lease_seconds=60)
+
+
+_OLD_SCHEMA = """
+CREATE TABLE lease_tasks (
+    task_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    spec_json TEXT NOT NULL,
+    state TEXT NOT NULL,
+    attempts_used INTEGER NOT NULL,
+    active_lease_json TEXT,
+    accepted_attempt_id TEXT,
+    lease_history_json TEXT NOT NULL,
+    seq INTEGER
+);
+"""
+
+
+def _spec(job_id, task_id):
+    return TaskSpec(task_id=task_id, job_id=job_id, commit_key=f"{job_id}/{task_id}/m.json")
 
 
 def test_store_rehydrates_full_task_state_across_instances(tmp_path):
@@ -104,3 +126,49 @@ def test_inflight_work_survives_coordinator_restart(tmp_path):
         assert c2.get(f"/v1alpha1/jobs/{job_id}").json()["state"] == "SUCCEEDED"
         tasks = c2.get(f"/v1alpha1/jobs/{job_id}/tasks").json()
         assert tasks[0]["attempts"] == 1  # no spurious retry from the restart
+
+
+def test_two_jobs_share_a_task_id_and_survive_reopen(tmp_path):
+    path = tmp_path / "leases.db"
+    store = SqliteLeaseStore(path)
+    store.add(TaskRecord(_spec("job-a", "task-000")))
+    store.add(TaskRecord(_spec("job-b", "task-000")))
+
+    reopened = SqliteLeaseStore(path)
+    assert reopened.get("job-a", "task-000").spec.job_id == "job-a"
+    assert reopened.get("job-b", "task-000").spec.job_id == "job-b"
+    assert len(reopened.all()) == 2
+
+
+def test_migration_preserves_an_in_flight_lease(tmp_path):
+    """The whole point of the durable store: a lease issued before the
+    upgrade must still be renewable after it."""
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(_OLD_SCHEMA)
+    spec = _spec("job-a", "task-000")
+    lease = {
+        "schema_version": "v1alpha1", "lease_id": "lease-1", "task_id": "task-000",
+        "job_id": "job-a", "node_id": "node-1", "attempt_id": "attempt-1",
+        "attempt_number": 1, "deadline": "2099-01-01T00:00:00Z",
+    }
+    conn.execute(
+        "INSERT INTO lease_tasks VALUES (?,?,?,?,?,?,?,?,?)",
+        ("task-000", "job-a", spec.model_dump_json(), "LEASED", 1,
+         json.dumps(lease), None, json.dumps({"lease-1": lease}), 1),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteLeaseStore(path)                      # migrates on open
+    record = store.get("job-a", "task-000")
+    assert record is not None
+    assert record.state == TaskState.LEASED
+    assert record.active_lease.lease_id == "lease-1"    # in-flight lease survived
+    assert "lease-1" in record.lease_history
+
+    cols = sqlite3.connect(path).execute("PRAGMA table_info(lease_tasks)").fetchall()
+    pk_cols = sorted(c[1] for c in cols if c[5] > 0)
+    assert pk_cols == ["job_id", "task_id"]             # composite PK now
+
+    store.add(TaskRecord(_spec("job-b", "task-000")))   # collision no longer possible

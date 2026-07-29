@@ -46,7 +46,7 @@ class LeaseStore(Protocol):
 
     def save(self, record: TaskRecord) -> None: ...
 
-    def get(self, task_id: str) -> TaskRecord | None: ...
+    def get(self, job_id: str, task_id: str) -> TaskRecord | None: ...
 
     def next_pending(self, job_id: str | None = None) -> TaskRecord | None:
         """Any PENDING task (optionally scoped to a job), or None. Must be
@@ -61,21 +61,28 @@ class LeaseStore(Protocol):
 
 
 class InMemoryLeaseStore:
-    """Reference implementation: insertion-ordered dict, no persistence."""
+    """Reference implementation: insertion-ordered dict, no persistence.
+
+    Keyed by (job_id, task_id): task ids are positional within a job
+    (`task-000`), so two jobs routinely produce the same task_id.
+    """
 
     def __init__(self) -> None:
-        self._tasks: dict[str, TaskRecord] = {}
+        self._tasks: dict[tuple[str, str], TaskRecord] = {}
 
     def add(self, record: TaskRecord) -> None:
-        if record.spec.task_id in self._tasks:
-            raise ValueError(f"task {record.spec.task_id} already exists")
-        self._tasks[record.spec.task_id] = record
+        key = (record.spec.job_id, record.spec.task_id)
+        if key in self._tasks:
+            raise ValueError(
+                f"task {record.spec.task_id} already exists in job {record.spec.job_id}"
+            )
+        self._tasks[key] = record
 
     def save(self, record: TaskRecord) -> None:
         pass  # live references — mutations are already visible
 
-    def get(self, task_id: str) -> TaskRecord | None:
-        return self._tasks.get(task_id)
+    def get(self, job_id: str, task_id: str) -> TaskRecord | None:
+        return self._tasks.get((job_id, task_id))
 
     def next_pending(self, job_id: str | None = None) -> TaskRecord | None:
         for record in self._tasks.values():

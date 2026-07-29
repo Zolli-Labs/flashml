@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from flashruntime.leases import LeaseError, LeaseManager
+from flashruntime.leases.store import InMemoryLeaseStore, TaskRecord
 from flashruntime.protocol.v1alpha1 import EventType, TaskSpec, TaskState
 
 T0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
@@ -30,6 +31,11 @@ def _task(task_id="t1", job_id="j1", lease_seconds=60.0, max_attempts=3):
         lease_seconds=lease_seconds,
         max_attempts=max_attempts,
     )
+
+
+def _task_spec(job_id: str, task_id: str) -> TaskSpec:
+    """Minimal spec for the (job_id, task_id) collision tests below."""
+    return TaskSpec(task_id=task_id, job_id=job_id, commit_key=f"{job_id}/{task_id}/m.json")
 
 
 def test_claim_heartbeat_complete_happy_path():
@@ -148,7 +154,51 @@ def test_twelve_trial_sweep_with_one_dead_worker_completes_exactly_once():
 def test_cancel_is_terminal_and_idempotent():
     mgr = _mgr()
     mgr.add_task(_task(), now=T0)
-    mgr.cancel_task("t1")
-    mgr.cancel_task("t1")  # idempotent
+    mgr.cancel_task("j1", "t1")
+    mgr.cancel_task("j1", "t1")  # idempotent
     assert mgr.claim("node-a", now=T0) is None
     assert mgr.job_state("j1") == {TaskState.CANCELLED.value: 1}
+
+
+def test_two_jobs_may_share_a_task_id():
+    store = InMemoryLeaseStore()
+    store.add(TaskRecord(_task_spec("job-a", "task-000")))
+    store.add(TaskRecord(_task_spec("job-b", "task-000")))  # must NOT raise
+    assert store.get("job-a", "task-000").spec.job_id == "job-a"
+    assert store.get("job-b", "task-000").spec.job_id == "job-b"
+
+
+def test_duplicate_within_one_job_still_rejected():
+    store = InMemoryLeaseStore()
+    store.add(TaskRecord(_task_spec("job-a", "task-000")))
+    with pytest.raises(ValueError):
+        store.add(TaskRecord(_task_spec("job-a", "task-000")))
+
+
+def test_get_is_job_scoped():
+    store = InMemoryLeaseStore()
+    store.add(TaskRecord(_task_spec("job-a", "task-000")))
+    assert store.get("job-b", "task-000") is None
+
+
+def test_claim_with_policy_picks_the_right_job():
+    """The policy path re-finds its chosen spec in `pending`. Matching on
+    task_id alone crosses job boundaries when ids collide."""
+    class PickJobB:
+        def choose(self, specs, node):
+            return next(s for s in specs if s.job_id == "job-b")
+
+    mgr = LeaseManager()
+    mgr.add_task(_task_spec("job-a", "task-000"))
+    mgr.add_task(_task_spec("job-b", "task-000"))
+    lease = mgr.claim("node-1", policy=PickJobB(), node={"node_id": "node-1"})
+    assert lease.job_id == "job-b"
+
+
+def test_cancel_task_is_job_scoped():
+    mgr = LeaseManager()
+    mgr.add_task(_task_spec("job-a", "task-000"))
+    mgr.add_task(_task_spec("job-b", "task-000"))
+    mgr.cancel_task("job-a", "task-000")
+    assert mgr.records("job-a")[0].state == TaskState.CANCELLED
+    assert mgr.records("job-b")[0].state == TaskState.PENDING
