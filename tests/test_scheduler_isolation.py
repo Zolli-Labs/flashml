@@ -204,3 +204,63 @@ def test_non_argv_tasks_are_unaffected():
     task = TaskSpec(task_id="t", job_id="j", commit_key="j/t/m.json",
                     payload={"module": "flashml_workloads.sklearn_trial"})
     assert IsolationAwarePlacement().eligible(task, {"node_id": "n1"}) is True
+
+
+# -- F1: module gate — fail-OPEN, the mirror of the argv gate above -----------
+#
+# An argv-only node poisons every module job in the pool otherwise: it
+# claims a module task, ArgvDockerRunner rejects the payload, the attempt
+# fails, and the task requeues within poll_seconds until maxTaskAttempts is
+# exhausted — job FAILED. The gate must exclude only a node that EXPLICITLY
+# says module_capable: false; absence/None must still mean capable, or every
+# already-deployed node (whose registration predates this field) silently
+# loses all module work the moment it ships.
+
+
+def _module_task():
+    from flashruntime.protocol.v1alpha1 import TaskSpec
+
+    return TaskSpec(
+        task_id="task-000", job_id="job-a", commit_key="job-a/task-000/m.json",
+        payload={"module": "flashml_workloads.sklearn_trial", "params": {}},
+    )
+
+
+def test_argv_only_node_ineligible_for_module_task():
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    node = {"node_id": "n1", "argv_capable": True, "module_capable": False}
+    assert IsolationAwarePlacement().eligible(_module_task(), node) is False
+
+
+def test_subprocess_or_docker_node_eligible_for_module_task():
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    node = {"node_id": "n1", "argv_capable": False, "module_capable": True}
+    assert IsolationAwarePlacement().eligible(_module_task(), node) is True
+
+
+def test_node_missing_module_capable_field_is_eligible_for_module_task():
+    """Old agent: registration predates module_capable entirely. Fail-open
+    on availability means it must keep receiving module work."""
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    node = {"node_id": "n1"}  # no module_capable key at all
+    assert IsolationAwarePlacement().eligible(_module_task(), node) is True
+
+
+def test_node_with_module_capable_none_is_eligible_for_module_task():
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    node = {"node_id": "n1", "module_capable": None}
+    assert IsolationAwarePlacement().eligible(_module_task(), node) is True
+
+
+def test_argv_gate_fail_closed_behaviour_is_unchanged_by_the_module_gate():
+    """The module gate must not loosen the pre-existing argv gate: a node
+    with module_capable True but argv_capable absent is still ineligible
+    for argv work."""
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    node = {"node_id": "n1", "sandbox_capable": True, "module_capable": True}
+    assert IsolationAwarePlacement().eligible(_argv_task(), node) is False

@@ -119,6 +119,30 @@ class IsolationAwarePlacement(PlacementPolicy):
     requirement only, never the argv-runner requirement, or arbitrary argv
     could land on a node with no argv runner at all.
 
+    A third gate applies to tasks carrying a `module` payload (the
+    "python -m <allowlisted module>" tier): the claiming node must not be
+    `module_capable is False`. Its polarity is deliberately the MIRROR of
+    the argv gate above, not a copy of it:
+
+    - `argv_capable` is fail-closed (`is True` required) because argv is a
+      *safety* boundary — placing argv on a node with no argv runner is a
+      security failure (ArgvDockerRunner's own payload check would refuse
+      it, but the whole point of placement is to not burn attempts getting
+      there).
+    - `module_capable` is fail-OPEN (`is False` excludes) because it is an
+      *availability* concern only — a module task misplaced on an
+      argv-only node wastes retry attempts, it never escapes a sandbox.
+      Defaulting to capable means an already-deployed node whose
+      registration predates this field (module_capable absent ⇒ None) —
+      or any node that simply never opted into an argv-only runner — keeps
+      receiving module work. Only a node that explicitly advertises
+      `module_capable: false` (an argv-only volunteer) is excluded.
+
+    Do NOT "harmonize" these two gates onto the same polarity — copying
+    the argv gate's `is True` pattern onto module_capable would silently
+    cut every already-deployed node off from module work the moment this
+    field shipped, without anyone having opted out of anything.
+
     Everything genuinely standard keeps the fail-open placement default."""
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
@@ -126,6 +150,13 @@ class IsolationAwarePlacement(PlacementPolicy):
         # the sandbox-tier requirement, and must never be readable as
         # permission to run argv on a node with no argv runner.
         if "argv" in task.payload and node.get("argv_capable") is not True:
+            return False
+        # Availability gate, mirrored polarity from the argv gate above —
+        # see the class docstring. An argv-only volunteer poisons every
+        # module job in the pool otherwise: it claims, ArgvDockerRunner
+        # rejects the payload, the attempt fails, and the task requeues
+        # into the same node's path until attempts are exhausted.
+        if "module" in task.payload and node.get("module_capable") is False:
             return False
         isolation = task.payload.get("isolation")
         if isolation is None:

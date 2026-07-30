@@ -135,6 +135,56 @@ def test_claim_endpoint_fails_closed_for_sandboxed_tasks():
     assert r.json()["task_id"] == "task-000"
 
 
+def test_claim_endpoint_fails_closed_for_sandbox_capable_node_without_argv_runner():
+    """Minor #6: the precise volunteer-pool threat case that already shipped
+    once — a node that is sandbox_capable but has NOT opted into an argv
+    runner (sandbox_capable=True, argv_capable=False). It must get nothing
+    for an argv command task; a fully-capable node must still get it."""
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from flashruntime.leases import LeaseManager
+    from flashruntime.protocol.v1alpha1 import IsolationSpec
+    from flashruntime.service.modea import ModeAState, build_router, expand_tasks
+
+    state = ModeAState(LeaseManager(), artifacts_dir=__import__("pathlib").Path("/tmp"))
+    app = fastapi.FastAPI()
+    app.include_router(build_router(state))
+    client = TestClient(app)
+
+    for task in expand_tasks("job1", _jobspec(isolation=IsolationSpec(tier="sandboxed"))):
+        state.manager.add_task(task)
+
+    def register(node_id: str, *, sandbox_capable: bool, argv_capable: bool):
+        r = client.post(
+            "/v1alpha1/nodes/register",
+            json={
+                "node_id": node_id,
+                "kubernetes_node": "",
+                "hostname": node_id,
+                "capabilities": {},
+                "sandbox_capable": sandbox_capable,
+                "argv_capable": argv_capable,
+            },
+        )
+        assert r.status_code == 200
+
+    register("sandboxed-but-no-argv-runner", sandbox_capable=True, argv_capable=False)
+    register("fully-capable", sandbox_capable=True, argv_capable=True)
+
+    # sandbox_capable alone is not enough: no argv runner behind it ⇒ nothing
+    assert (
+        client.post(
+            "/v1alpha1/leases/claim", json={"node_id": "sandboxed-but-no-argv-runner"}
+        ).status_code
+        == 204
+    )
+    # both flags true ⇒ gets the task
+    r = client.post("/v1alpha1/leases/claim", json={"node_id": "fully-capable"})
+    assert r.status_code == 200
+    assert r.json()["task_id"] == "task-000"
+
+
 # -- F1: legacy expansions must also stamp the isolation requirement -----------
 
 

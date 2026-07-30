@@ -220,6 +220,7 @@ class ModeAState:
                     "hostname": entry.registration.hostname,
                     "environment": entry.registration.environment,
                     "argv_capable": entry.registration.argv_capable,
+                    "module_capable": entry.registration.module_capable,
                     "capabilities": entry.registration.capabilities.model_dump(),
                     "online": age < NODE_OFFLINE_AFTER_S,
                     "last_heartbeat_age_s": round(age, 1),
@@ -297,6 +298,7 @@ def build_router(state: ModeAState) -> APIRouter:
             "node_id": req.node_id,
             "sandbox_capable": entry.registration.sandbox_capable,
             "argv_capable": entry.registration.argv_capable,
+            "module_capable": entry.registration.module_capable,
             "capabilities": entry.registration.capabilities.model_dump(),
         }
         lease = manager.claim(

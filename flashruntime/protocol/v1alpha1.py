@@ -289,6 +289,14 @@ class NodeRegistration(BaseModel):
     #: every already-deployed agent is excluded from argv work until it is
     #: upgraded and explicitly opted in (security fields fail closed).
     argv_capable: bool = False
+    #: This node can run "module" (python -m <allowlisted module>) tasks.
+    #: Defaults True — unlike argv_capable this is an AVAILABILITY gate, not
+    #: a safety one: a module task placed on an incapable node just wastes
+    #: attempts, it never escapes a sandbox. Defaulting True means every
+    #: already-deployed agent (whose registration predates this field)
+    #: keeps receiving module work; only a node that explicitly opts into
+    #: an argv-only runner sets this False (see scheduler.IsolationAwarePlacement).
+    module_capable: bool = True
     pool: str = "local"
     runtime_profile: str = "kubernetes"
     labels: dict[str, str] = Field(default_factory=dict)
