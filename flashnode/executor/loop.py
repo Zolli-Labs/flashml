@@ -190,10 +190,19 @@ class ExecutorLoop:
 
                 prefix = payload.get("output_prefix", f"jobs/{lease.job_id}/{lease.task_id}/")
                 metrics_sha = ""
-                for path in sorted(outdir.iterdir()):
+                # rglob, not iterdir: a job that writes nested output (e.g.
+                # out/checkpoints/model.pt) must not have it silently
+                # dropped just because ArgvDockerRunner's size cap already
+                # walks the tree recursively (argv_runner.py's rglob) while
+                # this used to upload only the top level.
+                for path in sorted(outdir.rglob("*")):
                     if path.is_file():
-                        sha = self.client.upload_artifact(path, f"{prefix}{path.name}")
-                        if path.name == "metrics.json":
+                        rel = path.relative_to(outdir)
+                        sha = self.client.upload_artifact(path, f"{prefix}{rel.as_posix()}")
+                        # metrics.json is the commit key: only the file AT
+                        # the output root counts, never a same-named file
+                        # nested in a subdirectory.
+                        if rel == Path("metrics.json"):
                             metrics_sha = sha
                 accepted = self.client.complete(lease.lease_id, metrics_sha or "0" * 64)
                 if accepted:

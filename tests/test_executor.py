@@ -296,6 +296,42 @@ def test_work_cli_refuses_sandboxed_runner_without_docker_binary(monkeypatch, ca
     assert "docker" in capsys.readouterr().err.lower()
 
 
+def test_loop_uploads_nested_output_and_still_commits_metrics_hash(stub):
+    """F7: ArgvDockerRunner size-caps with rglob (recursive) but the loop
+    used to upload with iterdir (top level only) — a job writing
+    out/checkpoints/model.pt passed the cap, uploaded nothing for it, and
+    still committed successfully. Nested files must upload under their
+    relative path, and metrics.json's hash — the commit key — must still be
+    exactly what's sent to complete()."""
+    coordinator, client = stub
+
+    class NestedOutputRunner:
+        def run(self, payload, workdir, inputs):
+            outdir = workdir / "out"
+            (outdir / "checkpoints").mkdir(parents=True)
+            (outdir / "checkpoints" / "model.pt").write_bytes(b"weights")
+            (outdir / "metrics.json").write_text('{"acc": 1.0}')
+            return outdir
+
+    coordinator.make_lease(
+        "t1",
+        payload={"task_id": "t1", "params": {}, "output_prefix": "jobs/j1/t1/"},
+    )
+    loop = ExecutorLoop(client, "n1", runner=NestedOutputRunner())
+    accepted = loop.run(max_tasks=1, idle_exit=True)
+
+    assert accepted == 1
+    # nested file uploaded under its relative path
+    assert coordinator.artifacts["jobs/j1/t1/checkpoints/model.pt"] == b"weights"
+    # top-level metrics.json also uploaded
+    assert coordinator.artifacts["jobs/j1/t1/metrics.json"] == b'{"acc": 1.0}'
+    # the hash committed is metrics.json's hash, not some other file's
+    import hashlib
+
+    expected_sha = hashlib.sha256(b'{"acc": 1.0}').hexdigest()
+    assert coordinator.completed[0] == ("ls-t1", expected_sha)
+
+
 def test_loop_honors_workdir_base(stub, fake_module, tmp_path):
     """Docker VMs on macOS only share $HOME — task workdirs must be
     placeable somewhere the VM can see (FLASHNODE_WORKDIR)."""
