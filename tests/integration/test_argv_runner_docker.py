@@ -21,8 +21,6 @@ import pytest
 from flashnode.executor.argv_runner import ArgvDockerRunner
 from flashnode.executor.runner import TaskExecutionError
 
-pytestmark = pytest.mark.integration
-
 IMAGE = "python:3.11-alpine"
 
 
@@ -63,9 +61,14 @@ def test_network_is_really_off(docker_workdir):
     message = str(exc_info.value)
     assert "PROBE_OK" in message, "container never got to the network call — not a sandbox failure"
     # --network none removes every route but loopback, so connect() fails
-    # immediately with ENETUNREACH ("Network is unreachable"); tolerate a
-    # couple of adjacent kernel/py phrasings rather than pin one string.
-    assert re.search(r"network is unreachable|no route to host|connection refused|timed out",
+    # immediately with ENETUNREACH ("Network is unreachable") or ENETDOWN-
+    # adjacent EHOSTUNREACH ("No route to host"). Deliberately NOT matching
+    # "connection refused" or "timed out": those are signatures of a
+    # REACHABLE network (something answered, or nothing did but the route
+    # existed) — on a host with restricted egress this test would pass even
+    # with --network none silently removed, which defeats the one thing
+    # this test exists to prove (Minor #8).
+    assert re.search(r"network is unreachable|no route to host",
                       message, re.IGNORECASE), f"not a network-denial signature: {message!r}"
 
 
