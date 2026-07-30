@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashruntime"
-version = "0.1.0"
+version = "0.2.0"
 description = "Open fault-tolerant distributed ML runtime: strategy planning, job protocol, leases, checkpointing, and recovery across heterogeneous compute."
 readme = "README.md"
 # PEP 639 SPDX expression (string form) — replaces the deprecated

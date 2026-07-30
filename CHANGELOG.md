@@ -11,6 +11,28 @@ independent of this package version.
 
 _No unreleased changes yet._
 
+## [0.2.0] - Unreleased
+
+### Added
+
+- **`NodeRegistration.module_capable`** (default `True`): advertises whether
+  a node can run "module" (`python -m <allowlisted module>`) tasks,
+  independent of `argv_capable`. `IsolationAwarePlacement` now refuses to
+  place a module-shaped task on a node that explicitly advertises
+  `module_capable: false` (an argv-only volunteer) — closing a gap where one
+  such node joining a pool would burn every attempt on an unrelated
+  `hyperparameter_search`/`sharded_kmeans` job and fail it. Unlike
+  `argv_capable`, this gate is fail-**open**: a registration that omits the
+  field (every node on the 0.1.0 wire format) keeps receiving module work.
+
+### Changed
+
+- Package version bumped to 0.2.0 because this release adds a new
+  wire-visible field (`module_capable`) to `NodeRegistration`. Consumers
+  pinned to `flashruntime>=0.1` may run against a 0.1.0 wheel that lacks
+  the field entirely; `flashnode`'s dependency pin moves to `>=0.2` in
+  lockstep.
+
 ## [0.1.0] - Unreleased
 
 First public release: the self-hostable, cloud-free fault-tolerant runtime.
@@ -86,5 +108,6 @@ DDP/FSDP2/torchrun, Ray, Hugging Face).
 - **Cloud is out of scope here.** FlashRuntime is useful and complete without
   the cloud; the managed control plane is a separate, private component.
 
-[Unreleased]: https://github.com/Zolli-Labs/flashruntime/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Zolli-Labs/flashruntime/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Zolli-Labs/flashruntime/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Zolli-Labs/flashruntime/releases/tag/v0.1.0
