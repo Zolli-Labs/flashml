@@ -11,9 +11,36 @@ Changing this function changes the guarantee for ALL runners.
 from __future__ import annotations
 
 import os
+import re
+import uuid
 from pathlib import Path
 
 CONTAINER_WORKDIR = "/work"
+
+# Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*. We prefix
+# with "flashnode-" (always alnum-first) so the sanitized task_id segment
+# only has to avoid illegal characters, not worry about its own leading
+# character.
+_NAME_ILLEGAL = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def container_name(task_id: object) -> str:
+    """A Docker-legal, collision-resistant name for this attempt's container.
+
+    Shared by every sandboxed runner (docker_runner, argv_runner) so a
+    timed-out `docker run` can be killed by the SAME name it was launched
+    with — the whole reason this lives in hardening.py rather than being
+    reimplemented per runner (AGENTS.md: a single security-contract seam,
+    not two copies that can drift).
+
+    task_id comes from an untrusted payload — sanitize it into the name
+    rather than interpolating it raw. A random suffix (not task_id alone)
+    guarantees uniqueness even when two concurrent attempts share a task_id
+    (e.g. a retried attempt racing a slow-to-expire prior one).
+    """
+    safe = _NAME_ILLEGAL.sub("-", str(task_id or ""))
+    suffix = uuid.uuid4().hex[:8]
+    return f"flashnode-{safe}-{suffix}" if safe else f"flashnode-{suffix}"
 
 
 def harden_args(

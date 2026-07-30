@@ -32,6 +32,7 @@ def _work(args: list[str]) -> int:
     import argparse
     import logging
     import os
+    import shutil
     import signal
 
     from flashnode.executor import CoordinatorClient, ExecutorLoop
@@ -71,6 +72,17 @@ def _work(args: list[str]) -> int:
                 f"flashnode work: --runner {opts.runner} requires FLASHNODE_ALLOWED_IMAGES "
                 "(comma-separated image references) — refusing to start with an "
                 "empty allowlist",
+                file=sys.stderr,
+            )
+            return 2
+        # Both sandboxed tiers shell out to the `docker` binary directly
+        # (subprocess.run(["docker", ...])); if it isn't installed that call
+        # raises FileNotFoundError deep inside a task attempt. Check for it
+        # here, at startup, rather than let the agent die on the first task.
+        if shutil.which("docker") is None:
+            print(
+                f"flashnode work: --runner {opts.runner} requires the `docker` CLI "
+                "on PATH — refusing to start without it",
                 file=sys.stderr,
             )
             return 2

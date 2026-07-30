@@ -19,7 +19,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from flashnode.executor.hardening import CONTAINER_WORKDIR, harden_args
+from flashnode.executor.hardening import CONTAINER_WORKDIR, container_name, harden_args
 from flashnode.executor.runner import DEFAULT_ALLOWED_MODULES, TaskExecutionError
 
 
@@ -65,8 +65,9 @@ class DockerRunner:
             )
         )
 
+        name = container_name(payload.get("task_id"))
         argv = [
-            "docker", "run", "--rm",
+            "docker", "run", "--rm", "--name", name,
             *harden_args(workdir, cpus=self.cpus, memory_gb=self.memory_gb),
             image,
             "python", "-m", module,
@@ -78,7 +79,20 @@ class DockerRunner:
                 argv, capture_output=True, timeout=self.timeout_seconds, check=False
             )
         except subprocess.TimeoutExpired:
+            # subprocess.run's timeout kills the docker CLIENT process, not
+            # the daemon-side container — it keeps running unless we kill it
+            # by name ourselves (same fix as ArgvDockerRunner; the leak was
+            # the reason hardening.py's container_name() is shared at all).
+            try:
+                subprocess.run(["docker", "kill", name], capture_output=True, timeout=10, check=False)
+            except Exception:
+                pass
             raise TaskExecutionError(f"task exceeded {self.timeout_seconds}s wall clock")
+        except OSError as exc:
+            # `docker` missing/removed mid-run raises FileNotFoundError here
+            # (a subclass of OSError). Degrade to a failed task, not a dead
+            # agent — execute_one only catches TaskExecutionError/LeaseLost.
+            raise TaskExecutionError(f"docker is unavailable: {exc}") from exc
         if proc.returncode != 0:
             tail = proc.stderr.decode(errors="replace")[-800:]
             raise TaskExecutionError(f"task exited {proc.returncode}: {tail}")

@@ -281,6 +281,21 @@ def test_work_cli_refuses_docker_runner_without_image_allowlist(monkeypatch, cap
     assert "FLASHNODE_ALLOWED_IMAGES" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("runner", ["docker", "argv"])
+def test_work_cli_refuses_sandboxed_runner_without_docker_binary(monkeypatch, capsys, runner):
+    """F6: subprocess.run(["docker", ...]) raises FileNotFoundError when
+    docker isn't installed; execute_one only catches TaskExecutionError/
+    LeaseLost, so that traceback would kill the whole agent on its first
+    task. Refuse to start at all, same failure mode as the allowlist check."""
+    from flashnode.agent import cli
+
+    monkeypatch.setenv("FLASHNODE_ALLOWED_IMAGES", "img:1")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    rc = cli.main(["work", "--runner", runner, "--coordinator", "http://localhost:1"])
+    assert rc == 2
+    assert "docker" in capsys.readouterr().err.lower()
+
+
 def test_loop_honors_workdir_base(stub, fake_module, tmp_path):
     """Docker VMs on macOS only share $HOME — task workdirs must be
     placeable somewhere the VM can see (FLASHNODE_WORKDIR)."""

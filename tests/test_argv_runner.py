@@ -142,6 +142,15 @@ def test_container_name_is_docker_legal_even_with_hostile_task_id(tmp_path, task
     assert re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", name)
 
 
+def test_missing_docker_binary_degrades_to_task_error(tmp_path):
+    """F6: mirrors the docker_runner test of the same name — a missing
+    `docker` binary raises FileNotFoundError (OSError) from subprocess.run
+    itself; it must become a failed task, not an agent-killing traceback."""
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError("docker")):
+        with pytest.raises(TaskExecutionError, match="docker"):
+            _runner().run(_payload(), tmp_path, {})
+
+
 def test_container_name_unique_across_concurrent_tasks(tmp_path):
     """Same task_id, two attempts — names must not collide."""
     (tmp_path / "out").mkdir()

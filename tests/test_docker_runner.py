@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -107,6 +108,41 @@ def test_spec_json_uses_container_paths_for_inputs(capture, tmp_path):
     _runner().run(_payload(), tmp_path, {"dataset": host_input})
     spec = json.loads((tmp_path / "spec.json").read_text())
     assert spec["inputs"]["dataset"] == "/work/inputs/data.csv"  # not the host path
+
+
+def test_timeout_kills_the_container_by_name(tmp_path):
+    """F5: DockerRunner leaked a live container on timeout for up to 900s —
+    ArgvDockerRunner had the docker-kill-by-name fix, DockerRunner didn't.
+    Mirrors test_argv_runner.py's test of the same name: the kill must
+    target the SAME name that appeared in `docker run --name`, not just
+    "some kill happened"."""
+    with mock.patch("flashnode.executor.docker_runner.subprocess.run") as run:
+        run.side_effect = [
+            subprocess.TimeoutExpired(cmd=["docker", "run"], timeout=1),
+            subprocess.CompletedProcess(["docker", "kill"], 0, stdout=b"", stderr=b""),
+        ]
+        with pytest.raises(TaskExecutionError, match="wall clock"):
+            _runner(timeout_seconds=1).run(_payload(), tmp_path, {})
+
+    assert run.call_count == 2
+    run_cmd = run.call_args_list[0][0][0]
+    kill_cmd = run.call_args_list[1][0][0]
+    name = run_cmd[run_cmd.index("--name") + 1]
+    assert kill_cmd[:2] == ["docker", "kill"]
+    assert kill_cmd[2] == name
+
+
+def test_missing_docker_binary_degrades_to_task_error(tmp_path):
+    """F6: a docker daemon that is merely down already surfaces as a
+    non-zero exit (handled). A missing `docker` BINARY raises
+    FileNotFoundError (a subclass of OSError) from subprocess.run itself —
+    that must degrade to a failed task, not propagate and kill the agent."""
+    with mock.patch(
+        "flashnode.executor.docker_runner.subprocess.run",
+        side_effect=FileNotFoundError("docker"),
+    ):
+        with pytest.raises(TaskExecutionError, match="docker"):
+            _runner().run(_payload(), tmp_path, {})
 
 
 def test_nonzero_container_exit_raises(monkeypatch, tmp_path):
