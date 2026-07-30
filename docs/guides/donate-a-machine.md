@@ -51,8 +51,17 @@ flashnode work --runner argv --coordinator https://<coordinator>
 `FLASHNODE_ALLOWED_IMAGES` is mandatory. `--runner argv` **refuses to start**
 against an empty allowlist — there is no "run whatever image the task sends"
 mode and no silent downgrade to an unsandboxed tier. You are naming, in
-advance, every image you consent to run; the coordinator can place tasks on
-your node only if their pinned image reference is in this list.
+advance, every image you consent to run.
+
+**The allowlist is enforced locally, by your agent — not by the
+coordinator.** The coordinator does not receive your `FLASHNODE_ALLOWED_IMAGES`
+and does not filter placement by image reference; it will claim you a task
+whose pinned image you never allowlisted just as readily as one you did.
+Your agent is what refuses to run it: `ArgvDockerRunner` checks the task's
+image against your local allowlist before invoking `docker run` at all, and
+the task simply fails (and gets requeued to another node) if it isn't
+listed. There is no silent downgrade either way — you just find out at
+your machine, not at the coordinator.
 
 ---
 
