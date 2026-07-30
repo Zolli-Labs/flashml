@@ -10,7 +10,12 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
-    "flashruntime>=0.1",
+    # >=0.2: 0.1.0 predates NodeRegistration.module_capable — a volunteer on
+    # that wheel would register without the field, and the coordinator's
+    # fail-open module gate happens to tolerate that, but argv_capable's
+    # fail-closed gate does not: pin the floor where the wire fields this
+    # agent emits actually exist.
+    "flashruntime>=0.2",
     "psutil>=5.9",
     "websockets>=12",
     "cryptography>=42",
