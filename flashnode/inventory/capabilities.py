@@ -59,7 +59,8 @@ def _parse_k8s_memory(value: str) -> int:
 
 def discover(node_id: str, kubernetes_node: str,
              node_meta: dict | None = None,
-             argv_capable: bool = False) -> NodeRegistration:
+             argv_capable: bool = False,
+             module_capable: bool = True) -> NodeRegistration:
     """Build the registration payload. `node_meta` is the Kubernetes Node
     object (status/metadata) when the agent has API access; None degrades to
     host-level probes only."""
@@ -105,6 +106,10 @@ def discover(node_id: str, kubernetes_node: str,
         # runner — never inferred, so the coordinator's fail-closed gate
         # cannot be satisfied by a node that merely has docker installed.
         argv_capable=argv_capable,
+        # Set by the agent to False only for an argv-only runner — the
+        # coordinator's module gate is fail-open (unlike argv_capable), so
+        # the default here matches every caller that doesn't pass it.
+        module_capable=module_capable,
         pool=labels.get("flashml.dev/pool", os.environ.get("FLASHNODE_POOL", "local")),
         runtime_profile=os.environ.get("FLASHNODE_RUNTIME_PROFILE", "kubernetes"),
         labels=labels,

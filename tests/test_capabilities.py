@@ -84,6 +84,19 @@ def test_argv_incapable_node_keeps_sandbox_capable_false(monkeypatch):
     assert reg.sandbox_capable is False
 
 
+def test_module_capable_defaults_true():
+    """Every caller that doesn't pass module_capable — including old code
+    paths — must keep advertising module capability (fail-open availability
+    gate, mirror of argv_capable's fail-closed default)."""
+    reg = discover("node-1", kubernetes_node="", node_meta=None)
+    assert reg.module_capable is True
+
+
+def test_module_capable_false_when_requested():
+    reg = discover("node-1", kubernetes_node="", node_meta=None, module_capable=False)
+    assert reg.module_capable is False
+
+
 def test_env_and_label_sandbox_capable_still_work_without_argv(monkeypatch):
     # The existing env-var and label paths must still set sandbox_capable
     # when argv_capable is False (e.g. --runner docker on a sandboxed host).

@@ -100,6 +100,12 @@ def _work(args: list[str]) -> int:
     registration = discover(
         node_id, kubernetes_node="", node_meta=None,
         argv_capable=(opts.runner == "argv"),
+        # An argv-only volunteer has no module runner behind it: advertise
+        # module_capable=False so the coordinator's placement gate stops
+        # routing "python -m <module>" tasks here (F1) — otherwise those
+        # tasks burn every attempt against ArgvDockerRunner's payload
+        # rejection before the job ever fails for real.
+        module_capable=(opts.runner != "argv"),
     )
     client.register(registration)
     loop = ExecutorLoop(

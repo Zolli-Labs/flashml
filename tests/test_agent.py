@@ -2,6 +2,8 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import pytest
+
 from flashnode.agent.daemon import Agent
 
 
@@ -78,3 +80,36 @@ def test_argv_runner_requires_an_image_allowlist(monkeypatch, capsys):
     monkeypatch.delenv("FLASHNODE_ALLOWED_IMAGES", raising=False)
     assert main(["work", "--runner", "argv"]) == 2
     assert "FLASHNODE_ALLOWED_IMAGES" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("runner,expect_module_capable", [
+    ("argv", False),      # F1: an argv-only volunteer has no module runner
+    ("docker", True),
+    ("subprocess", True),
+])
+def test_work_cli_sets_module_capable_from_runner_choice(
+    monkeypatch, tmp_path, runner, expect_module_capable
+):
+    """flashnode work must advertise module_capable=False only for
+    --runner argv — a docker/subprocess node still runs module tasks fine."""
+    import flashnode.inventory.capabilities as capabilities_mod
+    from flashnode.agent import cli
+    from flashnode.executor import CoordinatorClient, ExecutorLoop
+
+    monkeypatch.setenv("FLASHNODE_ALLOWED_IMAGES", "img:1")
+    monkeypatch.setenv("FLASHNODE_STATE_DIR", str(tmp_path))
+    captured = {}
+    real_discover = capabilities_mod.discover
+
+    def spy_discover(*args, **kwargs):
+        reg = real_discover(*args, **kwargs)
+        captured["module_capable"] = reg.module_capable
+        return reg
+
+    monkeypatch.setattr(capabilities_mod, "discover", spy_discover)
+    monkeypatch.setattr(CoordinatorClient, "register", lambda self, reg: None)
+    monkeypatch.setattr(ExecutorLoop, "run", lambda self, max_tasks=None: 0)
+
+    rc = cli.main(["work", "--runner", runner, "--coordinator", "http://localhost:1"])
+    assert rc == 0
+    assert captured["module_capable"] is expect_module_capable
