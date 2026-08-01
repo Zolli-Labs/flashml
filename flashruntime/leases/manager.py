@@ -277,6 +277,16 @@ class LeaseManager:
             lease = record.active_lease
             if lease is None or lease.node_id != node_id:
                 continue
+            # At this call site, `_is_live`'s `current.lease_id ==
+            # lease.lease_id` check is always true (we pass in
+            # `record.active_lease` itself) and its `record.state ==
+            # LEASED` check is already guaranteed by `_store.leased()`
+            # above — so today this reduces to the deadline comparison.
+            # Keep the delegation anyway: `leased()`'s filtering is a
+            # store-level contract that could change, and `_is_live` is
+            # the single canonical definition of "this lease is still
+            # good". Two copies of an authorization rule drift apart,
+            # and the drift would be a silent hole.
             if not self._is_live(record, lease, now):
                 continue
             scope.add((lease.job_id, lease.task_id))

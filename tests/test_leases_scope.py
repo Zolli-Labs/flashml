@@ -65,9 +65,17 @@ def test_an_expired_lease_leaves_scope(manager):
 
 
 def test_a_completed_task_leaves_scope(manager):
-    """_is_live also requires the record to still be LEASED, so a task whose
-    result was already accepted stops being writable — otherwise a second
-    upload could replace a committed artifact."""
+    """A task whose result was already accepted no longer appears in the
+    node's write scope — otherwise a second upload could replace a
+    committed artifact.
+
+    Note: `complete()` clears `record.active_lease` and moves the record off
+    LEASED, so this record is simply absent from `_store.leased()` and the
+    scan never reaches it. This does NOT exercise `_is_live`'s record-state
+    check specifically — it is a regression guard that `live_leases_for_node`
+    sources scope from `record.active_lease` (the live source of truth),
+    not from `lease_history` or `_store.all()`, either of which would still
+    surface this lease after completion."""
     manager.add_task(_task("job-1", "task-000"), now=T0)
     lease = manager.claim("node-a", now=T0)
     manager.complete(lease.lease_id, output_sha256="0" * 64, now=T0)
