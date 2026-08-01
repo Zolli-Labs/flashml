@@ -43,6 +43,29 @@ flashnode work --coordinator http://<coordinator>:8100
 #   FLASHNODE_WORKDIR=$HOME/.cache/flashnode   (macOS + colima: VM-visible workdirs)
 ```
 
+If the coordinator enforces per-machine authentication
+(`FLASHML_NODE_TOKENS` set server-side), save the bearer token you were
+given before running `work`:
+
+```bash
+flashnode login --coordinator http://<coordinator>:8100 --token <token>
+flashnode work --coordinator http://<coordinator>:8100   # reads the saved token automatically
+flashnode logout --coordinator http://<coordinator>:8100 # forget it locally (does not revoke server-side)
+```
+
+`login`/`logout` write to a per-coordinator credential store at
+`~/.flashnode/credentials.json` (override with `FLASHNODE_CREDENTIALS`),
+keyed by coordinator URL so one machine can hold separate tokens for
+separate pools. The file is written with mode `0600` on every save. A
+missing or unparseable file is treated as "no saved token" rather than a
+crash. `CoordinatorClient` sends the saved token as a bearer header on
+every request to that coordinator once it's saved — there is nothing else
+to configure. Token issuance is still manual and out-of-band today (the
+coordinator operator hands you the token; there is no self-service signup
+or browser device flow yet), and `flashnode logout` only removes the local
+copy — the operator revokes access by removing your token from the
+coordinator's configuration.
+
 - Stable node identity; registers with capabilities (CPU, RAM, arch, GPU)
   and **re-registers automatically** if the coordinator restarts.
 - **Outbound-only** HTTP — no inbound ports, no router configuration.
@@ -87,7 +110,9 @@ Working today:
 ```
 flashnode/
 ├── agent/       # CLI (`work`, `agent`), K8s-profile daemon, kube helper
-├── identity/    # stable node ID (Ed25519 signing: planned)
+├── identity/    # stable node ID (Ed25519 signing: planned); credentials.py
+│                #   is the per-coordinator bearer-token store behind
+│                #   `flashnode login`/`logout`
 ├── inventory/   # capability discovery (psutil + K8s allocatable)
 └── executor/    # the device work cycle:
     ├── client.py         # stdlib outbound HTTP: leases, artifacts, checkpoints
