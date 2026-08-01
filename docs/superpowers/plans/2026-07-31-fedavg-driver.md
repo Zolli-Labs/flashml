@@ -458,6 +458,48 @@ def test_resumes_from_supplied_weights(tmp_path):
     assert delta != json.loads((fresh / "delta.json").read_text())
 
 
+def test_batches_wrap_and_stay_full_size(tmp_path):
+    """batch_size that does not divide the shard evenly must still yield
+    full-size batches. Slicing (rather than wrapping) silently produced short
+    batches and reweighted those steps' loss."""
+    import flashml_workloads.fedavg_worker as w
+
+    sizes = []
+    real = w.build_model
+
+    def spy(*a, **k):
+        model = real(*a, **k)
+        fwd = model.forward
+
+        def wrapped(t):
+            sizes.append(int(t.shape[0]))
+            return fwd(t)
+
+        model.forward = wrapped
+        return model
+
+    # 64 rows / 2 shards = 32 samples; batch 12 does not divide 32.
+    w.build_model = spy
+    try:
+        out = tmp_path / "out"
+        out.mkdir()
+        w.run_worker(_spec(tmp_path, batch_size=12, local_steps=4), out)
+    finally:
+        w.build_model = real
+    assert sizes == [12, 12, 12, 12], f"short batch produced: {sizes}"
+
+
+def test_empty_shard_raises_instead_of_dividing_by_zero(tmp_path):
+    """num_shards > dataset_size is a legitimate spec that leaves trailing
+    shards empty; it must fail loudly, not ZeroDivisionError."""
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(ValueError, match="empty"):
+        fedavg_worker.run_worker(
+            _spec(tmp_path, dataset_size=2, num_shards=8, shard=7), out
+        )
+
+
 def test_rejects_weights_with_wrong_shapes(tmp_path):
     from flashml_workloads.fedavg_weights import WeightShapeMismatch
 
@@ -586,19 +628,29 @@ def run_worker(spec: dict, outdir: Path) -> dict:
 
     x, y = _make_shard(p)
     samples = int(x.shape[0])
+    if samples == 0:
+        # Reachable from a legitimate spec: num_shards > dataset_size leaves
+        # trailing shards empty. Fail loudly here rather than dividing by zero
+        # in the batch index below.
+        raise ValueError(
+            f"shard {p['shard']} of {p['num_shards']} is empty "
+            f"(dataset_size={p['dataset_size']}): fewer rows than shards"
+        )
     opt = torch.optim.SGD(model.parameters(), lr=p["lr"])
     loss_fn = nn.CrossEntropyLoss()
     batch = p["batch_size"]
 
-    # Batches are indexed by step (cyclic slices, no RNG state to carry) so a
-    # retried attempt reproduces the same delta — same rule as sgd_trainer.
-    torch.manual_seed(p["seed"] + p["shard"])
+    # Batch indices WRAP, exactly as sgd_trainer.py:82-83 does
+    # (`idx = [(base + i) % n ...]`), so every step sees a full-size batch even
+    # when batch does not divide samples. Slicing `x[start:start+batch]`
+    # instead would silently yield short batches and reweight those steps'
+    # loss. Indexed by step with no RNG, so a retried attempt reproduces the
+    # delta exactly.
     last_loss = 0.0
     for step in range(p["local_steps"]):
-        start = (step * batch) % samples
-        xb, yb = x[start:start + batch], y[start:start + batch]
-        if xb.shape[0] == 0:
-            xb, yb = x[:batch], y[:batch]
+        base = (step * batch) % samples
+        idx = [(base + i) % samples for i in range(batch)]
+        xb, yb = x[idx], y[idx]
         opt.zero_grad()
         loss = loss_fn(model(xb), yb)
         loss.backward()
@@ -616,7 +668,11 @@ def run_worker(spec: dict, outdir: Path) -> dict:
         "local_steps": p["local_steps"],
         "delta_file": "delta.json",
     }
-    (outdir / "metrics.json").write_text(json.dumps(metrics))
+    # sort_keys matches every sibling task module (sgd_trainer.py:113,
+    # kmeans_shard.py:64, sklearn_trial.py:84). metrics.json is the commit
+    # artifact whose sha256 the coordinator validates, so byte-stability
+    # is load-bearing, not style.
+    (outdir / "metrics.json").write_text(json.dumps(metrics, sort_keys=True))
     return metrics
 
 
@@ -638,7 +694,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_worker.py -v`
-Expected: 7 passed
+Expected: 9 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1197,7 +1253,7 @@ def run_fedavg(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_driver.py -v`
-Expected: 7 passed
+Expected: 9 passed
 
 - [ ] **Step 5: Commit**
 
