@@ -188,8 +188,18 @@ def test_rounds_reduce_loss_across_two_nodes(coordinator, tmp_path):
 
 
 def test_round_completes_on_quorum_when_a_node_never_reports(coordinator, tmp_path):
-    """The volunteer case: 3 shards dispatched, only 2 machines ever answer.
-    The round must aggregate rather than stall until the deadline."""
+    """The volunteer case: 3 shards dispatched, but the agent pool is capped
+    to exactly MAX_CLAIMS=2 successful claims and then stops claiming — the
+    third shard is never bound to any node and sits PENDING for the whole
+    test. There is no shard-to-node binding here (either node can claim
+    either shard), so what actually proves "one shard abandoned" is the
+    claim cap, not the node count: without it, both node identities could
+    sequentially serve all 3 shards before the driver's poll notices
+    quorum, and `participants` would be 3.
+
+    The round must aggregate on quorum (2 committed) rather than stall
+    waiting for the abandoned third shard until the deadline.
+    """
     nodes = ["node-a", "node-b"]
     for n in nodes:
         register_node(coordinator, n)
@@ -198,10 +208,20 @@ def test_round_completes_on_quorum_when_a_node_never_reports(coordinator, tmp_pa
     import threading
 
     stop = threading.Event()
+    claims_done = 0
+    claims_lock = threading.Lock()
+    MAX_CLAIMS = 2  # < num_shards=3: shard #3 is deliberately left unclaimed
 
     def agent_loop():
+        nonlocal claims_done
         while not stop.is_set():
-            if not drain_once(coordinator, nodes, tmp_path / "w"):
+            with claims_lock:
+                if claims_done >= MAX_CLAIMS:
+                    break
+            if drain_once(coordinator, nodes, tmp_path / "w"):
+                with claims_lock:
+                    claims_done += 1
+            else:
                 time.sleep(0.1)
 
     def drain_once(base, ns, wd) -> bool:
@@ -220,4 +240,8 @@ def test_round_completes_on_quorum_when_a_node_never_reports(coordinator, tmp_pa
         stop.set()
         t.join(timeout=10)
 
-    assert result["history"][0]["participants"] >= 2
+    # Exact, not >=: a regression that let the third (abandoned) shard get
+    # served too — e.g. quorum aggregation silently waiting for it, or the
+    # claim cap failing to hold it back — must fail this test, not pass it
+    # by accident under `>=`.
+    assert result["history"][0]["participants"] == 2

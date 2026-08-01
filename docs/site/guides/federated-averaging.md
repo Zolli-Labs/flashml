@@ -74,9 +74,16 @@ the honest behavior; a driver that tried to be more "inclusive" here would
 be quietly wrong instead.
 
 `tests/test_fedavg_convergence.py::test_round_completes_on_quorum_when_a_node_never_reports`
-pins exactly this: three shards are dispatched, only two machines ever
-answer, and the round still aggregates rather than hanging until the
-deadline.
+pins exactly this: three shards are dispatched but the test's agent pool is
+capped to exactly two successful claims and then stops claiming, so the
+third shard is never bound to any node and sits PENDING for the life of the
+test. The round still aggregates on the two that committed — with an exact
+`participants == 2` assertion — rather than hanging until the deadline
+waiting for the shard nobody was ever going to serve. (The cap on claims,
+not the node count, is what makes the third shard genuinely abandoned:
+either registered node can claim either shard, so without the cap both
+nodes could sequentially serve all three before the driver's poll notices
+quorum.)
 
 ## The `flashml.yaml` shape
 
