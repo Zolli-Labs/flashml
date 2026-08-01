@@ -52,6 +52,7 @@ ALLOWED_TASK_MODULES = {
     "flashml_workloads.sklearn_trial",
     "flashml_workloads.kmeans_shard",
     "flashml_workloads.sgd_trainer",
+    "flashml_workloads.fedavg_worker",
 }
 
 
@@ -81,10 +82,12 @@ def expand_tasks(job_id: str, spec: JobSpec) -> list[TaskSpec]:
             raise ExpansionError(str(exc)) from None
     if workload.type == "sharded_kmeans":
         return _expand_kmeans(job_id, spec)
+    if workload.type == "federated_averaging":
+        return _expand_fedavg(job_id, spec)
     if workload.type != "hyperparameter_search":
         raise ExpansionError(
-            f"lease backend supports workload types 'hyperparameter_search' and "
-            f"'sharded_kmeans', got '{workload.type}'"
+            f"lease backend supports workload types 'hyperparameter_search', "
+            f"'sharded_kmeans' and 'federated_averaging', got '{workload.type}'"
         )
     p = workload.parameters
     trials: list[dict] = list(p.get("trials") or [])
@@ -174,6 +177,69 @@ def _expand_kmeans(job_id: str, spec: JobSpec) -> list[TaskSpec]:
                     "module": "flashml_workloads.kmeans_shard",
                     "params": {"centroids": centroids},
                     "inputs": {"shard": shard_uri},
+                    "output_prefix": f"jobs/{job_id}/{task_id}/",
+                    "task_id": task_id,
+                    "image": spec.spec.image.reference,
+                    "isolation": isolation,
+                },
+            )
+        )
+    return tasks
+
+
+def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
+    """One federated-averaging *round*: one task per shard, each training
+    locally from the round's broadcast weights. The driver
+    (`flashml_workloads.fedavg_driver`) reduces the deltas and submits the
+    next round — same stage-composition pattern as `_expand_kmeans`.
+    """
+    p = spec.spec.workload.parameters
+    num_shards = int(p.get("num_shards", 0))
+    if num_shards < 1:
+        raise ExpansionError(f"federated_averaging needs num_shards >= 1, got {num_shards}")
+
+    inputs: dict[str, str] = {}
+    weights = p.get("weights")
+    if weights is not None:
+        if not str(weights).startswith("artifact://"):
+            raise ExpansionError(
+                f"input 'weights' must be an artifact:// URI, got {weights!r}"
+            )
+        inputs["weights"] = weights
+
+    isolation = {
+        "tier": spec.spec.isolation.tier,
+        "allowFallback": spec.spec.isolation.allowFallback,
+    }
+    # Every one of these is read unconditionally by fedavg_worker. Dropping a
+    # missing key here would defer the failure to a KeyError inside a container
+    # on a volunteer's machine, where it burns an attempt and reads as a node
+    # fault rather than a bad submission. Fail at expansion instead.
+    worker_keys = ("local_steps", "lr", "batch_size", "seed",
+                   "in_dim", "hidden", "out_dim", "dataset_size")
+    missing = [k for k in worker_keys if k not in p]
+    if missing:
+        raise ExpansionError(
+            f"federated_averaging is missing required parameters: {sorted(missing)}"
+        )
+
+    tasks = []
+    for shard in range(num_shards):
+        task_id = f"shard-{shard:03d}"
+        params = {k: p[k] for k in worker_keys}
+        params.update({"round": int(p.get("round", 0)),
+                       "shard": shard, "num_shards": num_shards})
+        tasks.append(
+            TaskSpec(
+                task_id=task_id,
+                job_id=job_id,
+                commit_key=f"jobs/{job_id}/{task_id}/metrics.json",
+                max_attempts=spec.spec.retryPolicy.maxTaskAttempts,
+                lease_seconds=float(p.get("lease_seconds", 120.0)),
+                payload={
+                    "module": "flashml_workloads.fedavg_worker",
+                    "params": params,
+                    "inputs": inputs,
                     "output_prefix": f"jobs/{job_id}/{task_id}/",
                     "task_id": task_id,
                     "image": spec.spec.image.reference,
