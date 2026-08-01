@@ -398,8 +398,9 @@ def _authenticated_node(state, token: str | None) -> str:
     return node_id
 
 
-#: An operator may name the machine it is forwarding for. Honoured ONLY from
-#: an operator credential — see `_write_identity`.
+#: An operator may name the machine it is forwarding for, on writes AND on
+#: the lease lifecycle. Honoured ONLY from an operator credential, and read in
+#: exactly one place — see `_write_identity`.
 DELEGATION_HEADER = "X-FlashML-On-Behalf-Of"
 
 
@@ -431,18 +432,21 @@ def _delegated_node(request: Request) -> str | None:
 
 
 def _write_identity(state, request: Request) -> str | None:
-    """Whose live leases confine this write? A node_id, or None for an
-    unscoped operator. 401 if the caller is neither.
+    """Which machine is this request acting as? A node_id, or None for an
+    unscoped operator that named nobody. 401 if the caller is neither.
 
-    THE single place delegation is decided, deliberately shared by both
-    authorize helpers below. Artifacts key writes by prefix and checkpoints
-    key them by the (job, task) pair; if each resolved the caller for itself,
-    the two would drift and the drift would be a silent hole — this repo has
-    been bitten by exactly that seam twice.
+    THE single place delegation is decided — the only reader of
+    `DELEGATION_HEADER` in the repo. Every authorization surface funnels
+    through here: artifacts key writes by prefix, checkpoints key them by the
+    (job, task) pair, and the lease lifecycle keys them by lease holder. If
+    each resolved the caller for itself the three would drift, and the drift
+    would be a silent hole — this repo has been bitten by exactly that seam
+    twice. (The name is historical: it predates the lifecycle endpoints. It
+    resolves *identity*, not writes.)
 
     Delegation can only ever *narrow*. An operator with no header keeps the
-    unscoped driver reach it has always had; the moment it asserts an
-    identity it is authorized precisely as that node would have been, so a
+    unscoped driver reach it has always had on writes; the moment it asserts
+    an identity it is authorized precisely as that node would have been, so a
     driver speaking for node-a loses its own `jobs/{job}/round-NNN/` keys.
     """
     token = _bearer(request)
@@ -465,6 +469,38 @@ def _write_identity(state, request: Request) -> str | None:
     # simply not authoritative, and a volunteer must never act as another
     # machine.
     return _authenticated_node(state, token)
+
+
+def _acting_node(state, request: Request) -> str:
+    """The machine this request acts as, where acting as *nobody* is not a
+    valid answer. Same resolution as `_write_identity` — same single header
+    reader — with the unscoped-operator case turned into a refusal.
+
+    The lease lifecycle (register / claim / heartbeat / complete / fail) is
+    always an act by a specific machine: a claim assigns work to a node, a
+    `fail` returns another node's task to the queue. An operator that names
+    nobody has no identity to check, and quietly letting it through would
+    hand the API the ability to drive *any* lease purely by omitting a
+    header — the exact requeue-steal hole `_require_lease_holder` closes,
+    re-opened for the credential that is easiest to forward wrongly.
+
+    A node token is unaffected: `_write_identity` never honours the header
+    for it, so it is always itself and can never reach another node's lease.
+    """
+    node_id = _write_identity(state, request)
+    if node_id is None:
+        # The pre-delegation answer, unchanged and deliberately so: an
+        # operator token is not a node identity, so it 401s here exactly as
+        # it did before this header existed (pinned by the write-scope
+        # suite). Naming a machine is what gives it one.
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "operator credential is not a node identity — name the "
+                f"machine in {DELEGATION_HEADER} to act for it"
+            ),
+        )
+    return node_id
 
 
 def _authorize_write(state, manager, request: Request, key: str) -> None:
@@ -525,13 +561,16 @@ def _require_lease_holder(state, manager, request: Request, lease_id: str) -> No
     scoping above. Scoping writes without owning the lifecycle just moves the
     hole down one layer.
 
-    Operator tokens are NOT accepted here. A driver holds no lease; letting
-    an unscoped credential fail somebody's attempt would re-open exactly the
-    requeue attack this closes.
+    A *bare* operator token is still NOT accepted here. A driver holds no
+    lease; letting an unscoped credential fail somebody's attempt would
+    re-open exactly the requeue attack this closes. An operator that names a
+    machine in `DELEGATION_HEADER` is a different thing: it is checked
+    against *that machine's* lease, so the forwarded call is authorized
+    exactly as the direct call would have been and no more.
     """
     if not state.authenticator.enforcing:
         return
-    node_id = _authenticated_node(state, _bearer(request))
+    node_id = _acting_node(state, request)
     lease = manager.lease_info(lease_id)
     if lease is None or getattr(lease, "node_id", None) != node_id:
         # 403 for unknown as well as not-yours: a 404/403 split would tell an
@@ -554,11 +593,10 @@ def build_router(state: ModeAState) -> APIRouter:
             if supplied != state.join_code:
                 raise HTTPException(status_code=403, detail="invalid or missing join code")
         if state.authenticator.enforcing:
-            # Identity comes from the credential, never from the body — a node
-            # must not be able to register (and so claim work) as another.
-            reg = reg.model_copy(
-                update={"node_id": _authenticated_node(state, _bearer(request))}
-            )
+            # Identity comes from the credential (or, for an operator, from
+            # the machine it names) — never from the body. A node must not be
+            # able to register (and so claim work) as another.
+            reg = reg.model_copy(update={"node_id": _acting_node(state, request)})
         state.nodes[reg.node_id] = _NodeEntry(
             registration=reg, last_heartbeat=datetime.now(timezone.utc)
         )
@@ -567,8 +605,12 @@ def build_router(state: ModeAState) -> APIRouter:
     @router.post("/nodes/{node_id}/heartbeat")
     async def node_heartbeat(node_id: str, hb: NodeHeartbeat, request: Request):
         if state.authenticator.enforcing:
-            caller = _authenticated_node(state, _bearer(request))
+            caller = _acting_node(state, request)
             if caller != node_id:
+                # "itself" means the asserted machine when an operator is
+                # forwarding — a heartbeat keeps a node marked online, so
+                # letting the API send one for an arbitrary node_id would
+                # falsify the pool view.
                 raise HTTPException(
                     status_code=403, detail="a node may only heartbeat itself"
                 )
@@ -589,8 +631,10 @@ def build_router(state: ModeAState) -> APIRouter:
         if state.authenticator.enforcing:
             # Overwrite rather than validate-and-reject: a body node_id is
             # simply not authoritative, so a disagreement is not an error to
-            # report — there is nothing here to disagree with.
-            req.node_id = _authenticated_node(state, _bearer(request))
+            # report — there is nothing here to disagree with. That holds for
+            # the forwarded case too: the operator's header decides, the body
+            # is still ignored.
+            req.node_id = _acting_node(state, request)
         entry = state.nodes.get(req.node_id)
         if entry is None:
             raise HTTPException(status_code=403, detail="unregistered node — register first")
