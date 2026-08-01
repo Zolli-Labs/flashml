@@ -948,8 +948,13 @@ ALLOWED_TASK_MODULES so expansion does not fail closed."
 **Interfaces:**
 - Consumes: `fedavg_weights.reduce_deltas/apply_delta/encode` (Task 1); the `federated_averaging` workload type (Task 3).
 - Produces:
-  - `run_fedavg(base_url, *, rounds, num_shards, min_participants, worker_params, round_timeout_s=600.0, poll_seconds=1.0, on_round=None) -> dict`
-    returning `{"weights": blob, "history": [RoundResult, ...], "job_ids": [str, ...]}`
+  - `run_fedavg(coord: Coordinator, *, rounds, num_shards, min_participants, worker_params, initial_weights, round_timeout_s=600.0, poll_seconds=1.0, lease_seconds=120.0, on_round=None) -> dict`
+    returning `{"weights": blob, "history": [RoundResult, ...], "job_ids": [str, ...]}`.
+    It takes a `Coordinator`, **not** a base URL — the HTTP adapter that turns a
+    URL into one is Task 5, which is also what lets the cloud API inject auth
+    headers without the driver knowing about auth. `initial_weights` is required
+    and must already be encoded (`fedavg_weights.encode` is the caller's job,
+    not the driver's).
   - `RoundResult` TypedDict: `{"round": int, "participants": int, "mean_loss": float, "job_id": str}`
   - `QuorumNotMet(RuntimeError)`
 
@@ -1153,10 +1158,15 @@ Pure stdlib: this runs inside the cloud API, which must not carry torch.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Callable, Protocol, TypedDict
 
 from flashml_workloads.fedavg_weights import apply_delta, reduce_deltas
+
+#: Filenames a task may declare for its delta artifact. Allowlist, because the
+#: value arrives from an untrusted volunteer node.
+_SAFE_DELTA_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 __all__ = ["ArtifactNotFound", "Coordinator", "QuorumNotMet", "RoundResult",
            "run_fedavg"]
@@ -1234,7 +1244,10 @@ def _safe_delta_key(metrics_key: str, delta_file: str) -> str:
     in — an artifact belonging to somebody else's job. Result verification
     is M3; this is not that, it is basic path containment and belongs here.
     """
-    if "/" in delta_file or "\\" in delta_file or delta_file in ("", ".", ".."):
+    # ALLOWLIST, not denylist. A denylist of "/" and "\\" still admits %2F, a
+    # leading ~, and embedded null bytes; against untrusted input the only
+    # defensible shape is "these characters and no others".
+    if not _SAFE_DELTA_FILE.match(delta_file) or delta_file in (".", ".."):
         raise ValueError(
             f"task declared an unsafe delta_file {delta_file!r}: "
             "must be a plain filename in the task's own output prefix"
@@ -1301,7 +1314,10 @@ def run_fedavg(
                     f"round {r}: timed out with {len(keys)} of "
                     f"{min_participants} needed ({num_shards} shards dispatched)"
                 )
-            time.sleep(poll_seconds)
+            # Clamp to the remaining time: an unclamped sleep overruns the
+            # deadline by up to one poll interval whenever round_timeout_s is
+            # shorter than poll_seconds.
+            time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
 
         # Freeze the participant set at the moment quorum was reached, then
         # download. Anything committing from here on is discarded by
@@ -1314,10 +1330,15 @@ def run_fedavg(
         coord.put_artifact(weights_key, weights)
         weights_uri = f"artifact://{weights_key}"
 
+        # Sample-weighted, matching the delta reduce above. An unweighted mean
+        # lets a low-sample straggler with high loss skew the number an
+        # operator reads to judge convergence, out of all proportion to its
+        # actual contribution to the aggregate.
+        total_n = sum(n for _, n, _ in collected)
         result: RoundResult = {
             "round": r,
             "participants": len(collected),
-            "mean_loss": sum(loss for _, _, loss in collected) / len(collected),
+            "mean_loss": sum(loss * n for _, n, loss in collected) / total_n,
             "job_id": job_id,
         }
         history.append(result)
