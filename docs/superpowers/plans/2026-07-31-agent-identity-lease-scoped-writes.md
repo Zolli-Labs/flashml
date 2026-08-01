@@ -813,6 +813,121 @@ startup failure rather than a silent open door."
 
 ---
 
+### Task 4b: Close the bypasses the Task 3 review found
+
+**Files:**
+- Modify: `flashruntime/flashruntime/service/auth.py`
+- Modify: `flashruntime/flashruntime/service/modea.py`
+- Test: extend `flashruntime/tests/test_service_write_scope.py`, `flashruntime/tests/test_service_auth.py`
+
+**Why this task exists.** The adversarial review of Task 3 found that scoping
+*writes* alone does not close the hole. Three of its four findings are
+load-bearing, and the third means the plan as originally scoped was
+insufficient. All four are verified.
+
+**4b-1 (Critical) — TOCTOU: authorization runs before the body is read.**
+`modea.py:554` authorizes, `:555` awaits `request.body()`, `:563` writes. A node
+claims a task, opens a chunked `PUT`, and trickles bytes. The sweeper expires the
+lease, the task requeues, another node completes and commits — then the original
+body lands and overwrites the committed result. **The window is attacker-controlled
+(slow body), not bounded by the lease duration, and it defeats revocation
+entirely.**
+Fix: call `_authorize_write` **again** after `data = await request.body()`, before
+writing. `live_leases_for_node` already stops covering a completed or reclaimed
+task, so the re-check closes it. Keep the first check too — it rejects
+unauthorized callers before buffering a large body.
+
+**4b-2 (Important) — a non-ASCII bearer token is an unauthenticated remote 500.**
+`hmac.compare_digest` raises `TypeError` on non-ASCII `str` (verified). That is a
+500 instead of a 401, and the difference is an oracle distinguishing "malformed
+token" from "wrong token".
+Fix: in `StaticTokenAuthenticator.authenticate`, return `None` when
+`not token.isascii()`. Test that a non-ASCII token yields 401, not 500.
+
+**4b-3 (Important) — the lease lifecycle endpoints are unauthenticated, which
+bypasses everything above.** `claim` (`modea.py:450`) takes `node_id` from the
+**request body**; `attempt_complete` (`:482`) and `attempt_fail` (`:518`) take a
+`lease_id` and check nothing. An attacker repeatedly fails another node's attempt
+until the task requeues to himself, then writes his poison *legitimately* — write
+scoping is bypassed one layer down. Note this also violates the spec's own rule
+(§5.2): "the API resolves `node_id` **from the token**, never from the request
+body."
+Fix, when enforcing:
+- `claim`: resolve `node_id` from the token and **overwrite** `req.node_id` rather
+  than validating it. A mismatch is not an error to report; the body value is
+  simply not authoritative.
+- `attempt_complete` / `attempt_fail`: 403 unless the lease named by `lease_id`
+  is currently held by the authenticated node. `manager.lease_info(lease_id)`
+  returns the `Lease`, which carries `node_id`.
+- `nodes/register`: resolve the registering `node_id` from the token too, so a
+  node cannot register under another's identity.
+
+**4b-4 (Important) — enforcing mode breaks the drivers.**
+`flashml_workloads/fedavg_driver.py` PUTs `jobs/{job}/round-NNN/weights.json` and
+`kmeans_driver.py` PUTs shard CSVs. **Neither holds a lease**, so both get 403 the
+moment tokens are configured — federated averaging and K-means become unrunnable
+in exactly the deployment this plan exists to enable.
+
+This is a real gap in the original design: a driver is a legitimate writer that
+holds no lease. It runs inside the trusted cloud API (spec §5.4.5), not on a
+volunteer machine, so it needs a different credential class — not an exemption.
+
+Fix: add `FLASHML_OPERATOR_TOKENS` (same `name:token` format). An operator token
+authenticates and is attributable, but is **not** lease-scoped. Volunteers never
+receive one. `NodeAuthenticator` gains `is_operator(token) -> bool`; the two
+authorize helpers allow when it returns True. Test that an operator token may
+write `jobs/{job}/round-000/weights.json` while a node token may not.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/test_service_write_scope.py`: a non-ASCII token yields 401 not 500;
+`node-b` cannot `complete` or `fail` a lease held by `node-a`; `claim` ignores a
+body `node_id` that disagrees with the token; an operator token may write the
+round-weights key that a node token cannot. Add to `tests/test_service_auth.py`:
+`is_operator` is True only for configured operator tokens, and operator tokens
+are rejected at construction if they collide with a node token.
+
+The TOCTOU re-check needs a test that does not depend on real streaming: assert
+`_authorize_write` is called twice per `put_artifact` (monkeypatch a counter), and
+separately that a write is refused when the lease is expired *between* the two
+calls (patch `live_leases_for_node` to return the scope on the first call and an
+empty set on the second).
+
+- [ ] **Step 2: Run to verify they fail; Step 3: implement; Step 4: verify**
+
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_service_write_scope.py tests/test_service_auth.py tests/test_service_modea.py -v`
+
+Then the whole repo, plus **the fedavg demo with tokens configured** — that is the
+regression this task exists to prevent:
+
+```
+PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest -q --ignore=tests/test_examples_e2e.py --ignore=tests/test_gpu_e2e.py
+FLASHML_NODE_TOKENS=node-a:tok-a FLASHML_OPERATOR_TOKENS=driver:op-tok \
+  PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -u scripts/fedavg_local_demo.py
+```
+
+The demo must still converge `0.5361 → 0.1757` and exit 0 with enforcement on.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add flashruntime/service/auth.py flashruntime/service/modea.py \
+        tests/test_service_write_scope.py tests/test_service_auth.py
+git commit -m "fix(service): close the bypasses around lease-scoped writes
+
+Scoping writes alone did not close the hole. The lease lifecycle endpoints
+were unauthenticated, so an attacker could fail another node's attempt until
+the task requeued to himself and then write legitimately. Authorization also
+ran before the request body was read, giving a slow upload an
+attacker-controlled window past its own lease expiry. A non-ASCII bearer
+token was an unauthenticated remote 500 and a 500-vs-401 oracle. And
+enforcing mode made the drivers unrunnable, since a driver is a legitimate
+writer that holds no lease — it now uses an operator credential rather than
+an exemption."
+```
+
+---
+
 ### Task 5: flashnode sends a credential
 
 **Files:**
