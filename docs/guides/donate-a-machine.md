@@ -65,6 +65,63 @@ your machine, not at the coordinator.
 
 ---
 
+## Authenticating your machine
+
+If the coordinator you're joining enforces per-machine authentication (it
+does this by setting `FLASHML_NODE_TOKENS` server-side — see below), you
+need a token before `flashnode work` can register, claim leases, or commit
+results. The operator hands you a token out of band (chat, a secrets
+manager, whatever channel they already use); you save it once with:
+
+```bash
+flashnode login --coordinator https://<coordinator> --token <the-token-they-gave-you>
+```
+
+This writes the token to a per-coordinator credential store at
+`~/.flashnode/credentials.json` (mode `0600`, one entry per coordinator URL
+so a single machine can join several pools without one login clobbering
+another). Every subsequent `flashnode work --coordinator https://<coordinator>`
+reads it automatically and sends it as a bearer token on every request — you
+do not pass `--token` to `work` itself. To stop using a coordinator, run
+`flashnode logout --coordinator https://<coordinator>`, which deletes the
+saved entry (it does not revoke the token on the server — see below).
+
+**What the token buys you, and what it doesn't:**
+
+- The coordinator resolves your `node_id` **from the token**, never from
+  anything your agent sends in a request body. A stolen bearer token
+  impersonates your node; treat it like a password.
+- Once authenticated, the coordinator only lets you write under
+  `jobs/{job}/{task}/` for tasks you currently hold a **live lease** on —
+  the [known limitation below](#known-limitations) about one node
+  overwriting another's results is closed when enforcement is on. Reads are
+  unauthenticated regardless (by design — see the note at the end of this
+  section).
+- **Revocation is real but manual and server-side.** The coordinator's
+  operator removes your `node_id:token` pair from `FLASHML_NODE_TOKENS` and
+  restarts the coordinator; your next request gets `401` immediately.
+  There is no self-service token rotation and no expiry — a token is valid
+  until the operator edits their configuration. `flashnode logout` only
+  forgets the token locally; it has no effect on the server.
+- **Tokens are configured statically on the coordinator today.** The
+  operator sets `FLASHML_NODE_TOKENS=node-a:tok-a,node-b:tok-b,...` before
+  starting the process; there is no self-service enrolment, no signup form,
+  and no browser device-code flow. `flashnode login` just saves a token you
+  were already given — it does not obtain one. Self-service issuance is
+  planned for the cloud API, not this milestone.
+- **If the coordinator does not set `FLASHML_NODE_TOKENS` at all**, it
+  behaves exactly as before this feature existed: no authentication, no
+  write scoping, `flashnode login` is unnecessary. This is still the
+  default for a single trusted machine or a fully local dev loop. An
+  operator who wants to *require* tokens (refuse to start without any
+  configured) sets `FLASHML_REQUIRE_NODE_AUTH=1`.
+- **Read access is unauthenticated either way.** Anyone who can reach the
+  coordinator can `GET` an artifact today, token or no token. Read-side
+  authorization is the cloud API's job in a later milestone — see the
+  known limitations below.
+
+---
+
 ## Your consent knobs
 
 Every knob below has a safe default. Set the ones that matter for your
@@ -77,7 +134,7 @@ machine before you run `flashnode work`.
 | `FLASHNODE_MAX_MEMORY_GB` | `2.0` | `--memory` cap, with `--memory-swap` set to the **same** value (see below — otherwise the cap is bypassable). |
 | `FLASHNODE_TASK_TIMEOUT_S` | `3600` | Wall-clock seconds before the agent kills the container. |
 | `FLASHNODE_MAX_OUTPUT_BYTES` | `2147483648` (2 GiB) | Enforced against the task's output directory before upload; over the cap, nothing is uploaded and the task fails. |
-| `FLASHNODE_JOIN_CODE` | *(none)* | The shared secret this coordinator's operator gave you to register at all. See [One shared join code](#one-shared-join-code) below. |
+| `FLASHNODE_JOIN_CODE` | *(none)* | The shared secret this coordinator's operator gave you to register at all, if the coordinator still gates registration that way. |
 
 ---
 
@@ -126,13 +183,23 @@ These are not edge cases buried in fine print — they are the current state of
 the system, and you should weigh them before joining.
 
 1. **No result verification.** A volunteer node that returns fabricated
-   `metrics.json` output is currently **believed**. Nothing today re-runs a
-   sample of tasks elsewhere and compares results. Spot-check verification
-   and a reputation system are designed but not built.
-2. **One shared join code.** All volunteers on a coordinator authenticate
-   with the same `FLASHNODE_JOIN_CODE`. There is no per-node identity and no
-   way to revoke a single misbehaving node without rotating the code for
-   everyone.
+   `metrics.json` output is currently **believed**. Per-machine tokens (see
+   [Authenticating your machine](#authenticating-your-machine)) confine
+   *where* a node may write — they say nothing about whether what it writes
+   is true. Nothing today re-runs a sample of tasks elsewhere and compares
+   results. Spot-check verification and a reputation system are designed
+   but not built.
+2. **Static, out-of-band token issuance.** Per-machine tokens replaced the
+   old shared join code — each volunteer now authenticates with its own
+   `flashnode login`-saved bearer token, confined to the leases it holds,
+   and revocable by removing that one node's entry from the coordinator's
+   `FLASHML_NODE_TOKENS` (see [Authenticating your machine](#authenticating-your-machine)).
+   What's still missing: there is no self-service enrolment — an operator
+   configures tokens statically before you can join — and no browser
+   device-code flow; that arrives with the cloud API. `POST
+   /v1alpha1/jobs` is also still unauthenticated regardless of node tokens,
+   so anyone who can reach the coordinator can submit a job today; job
+   ownership is the cloud API's job in a later milestone.
 3. **Container escape is not ruled out.** The flags above are real and
    meaningfully raise the bar, but hardened Docker still shares your host
    kernel with the job. This is not the isolation guarantee of a virtual

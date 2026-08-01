@@ -120,9 +120,19 @@ not deferred:
   queue, so `1e9` would pin a shard to a closed laptop for ~31 years and
   `inf` overflows `timedelta` inside the coordinator's claim path.
 
-Known and deliberately still open: artifact `PUT` is neither authenticated
-nor lease-scoped, so the global model lives in a volunteer-writable
-namespace. That is fixed by the per-machine-token slice, not here.
+Artifact `PUT` is now authenticated and lease-scoped when the coordinator
+sets `FLASHML_NODE_TOKENS` (the per-machine-token slice): a node token can
+only write under `jobs/{job}/{task}/` for a task it currently holds a live
+lease on. The round-weights key
+(`jobs/{job_id}/round-{round:03d}/weights.json`) belongs to no task and no
+node's lease, so a plain node token cannot write it — the driver instead
+authenticates with an **operator token** (`FLASHML_OPERATOR_TOKENS`), which
+is attributable but deliberately not lease-scoped, exactly because drivers
+are legitimate writers outside any lease (see
+`docs/guides/donate-a-machine.md`). Result verification is still a separate,
+unbuilt concern: this scoping stops an unrelated node from *overwriting* the
+round weights, not from a participant lying about the delta it honestly
+computed.
 
 ## The `flashml.yaml` shape
 
