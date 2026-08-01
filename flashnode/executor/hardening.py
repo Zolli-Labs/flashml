@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import uuid
 from pathlib import Path
 
@@ -43,6 +44,39 @@ def container_name(task_id: object) -> str:
     return f"flashnode-{safe}-{suffix}" if safe else f"flashnode-{suffix}"
 
 
+def _user_flag() -> list[str]:
+    """The `--user` flag, or nothing, depending on what the platform can
+    actually prove about identity.
+
+    - POSIX (`os.getuid`/`os.getgid` exist): pass the invoking user's real
+      uid:gid, exactly as before. Files written into the bind-mounted
+      workdir come back owned by the caller, not root.
+    - Windows: `os.getuid`/`os.getgid` don't exist, and Docker Desktop does
+      not map a host identity into the Linux container the way a native
+      Linux daemon does — there is no host uid to pass. Omitting `--user`
+      here is safe ONLY because every curated image
+      (flashml-cloud/images/*/Dockerfile) ends in a fixed non-root `USER`;
+      see that directory's README.md and flashml-cloud's
+      docs/superpowers/plans/2026-08-01-windows-hosts.md ("The trap at the
+      centre of this plan"). If any curated image ever regresses to
+      running as root, this omission silently runs strangers' code as
+      container root on every Windows host.
+    - Anything else: refuse. Security fields fail closed
+      (flashruntime/CLAUDE.md rule 3) — an unrecognised platform must not
+      silently produce a container running as an unknown, possibly root,
+      identity.
+    """
+    if hasattr(os, "getuid"):
+        return ["--user", f"{os.getuid()}:{os.getgid()}"]
+    if sys.platform == "win32":
+        return []
+    raise RuntimeError(
+        f"cannot determine a safe --user for platform {sys.platform!r}: "
+        "no os.getuid/os.getgid and not win32 — refusing to run "
+        "unprivileged-in-name-only"
+    )
+
+
 def harden_args(
     workdir: Path,
     *,
@@ -57,7 +91,7 @@ def harden_args(
         "--network", "none",
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
-        "--user", f"{os.getuid()}:{os.getgid()}",
+        *_user_flag(),
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         f"--pids-limit={pids_limit}",
