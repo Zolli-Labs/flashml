@@ -178,7 +178,7 @@ def test_scalar_parameter_with_empty_shape_is_accepted():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_weights.py -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_weights.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'flashml_workloads.fedavg_weights'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -315,7 +315,7 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_weights.py -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_weights.py -v`
 Expected: 14 passed
 
 - [ ] **Step 5: Commit**
@@ -471,7 +471,7 @@ def test_rejects_weights_with_wrong_shapes(tmp_path):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_worker.py -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_worker.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'flashml_workloads.fedavg_worker'`
 
 (If it reports `skipped` instead, torch is not installed in the venv: `uv pip install torch`.)
@@ -637,8 +637,8 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_worker.py -v`
-Expected: 14 passed
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_worker.py -v`
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
@@ -738,7 +738,7 @@ def test_rejects_zero_shards():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_service_fedavg.py -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_service_fedavg.py -v`
 Expected: FAIL — `ExpansionError: lease backend supports workload types 'hyperparameter_search' and 'sharded_kmeans', got 'federated_averaging'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -829,7 +829,7 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_service_fedavg.py tests/test_service_modea.py -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_service_fedavg.py tests/test_service_modea.py -v`
 Expected: 8 new passed; `test_service_modea.py` unchanged and green
 
 - [ ] **Step 5: Commit**
@@ -999,7 +999,7 @@ def test_on_round_callback_receives_progress():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_driver.py -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_driver.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'flashml_workloads.fedavg_driver'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1176,7 +1176,7 @@ def run_fedavg(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_driver.py -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_driver.py -v`
 Expected: 7 passed
 
 - [ ] **Step 5: Commit**
@@ -1289,7 +1289,7 @@ def test_run_fedavg_resumes_from_start_round():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_driver.py -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_driver.py -v`
 Expected: FAIL — `ImportError: cannot import name 'HttpCoordinator'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1391,8 +1391,8 @@ comes from the parameter).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_driver.py -v`
-Expected: 15 passed
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_driver.py -v`
+Expected: 14 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1459,7 +1459,7 @@ def test_round_completes_on_quorum_when_one_agent_dies(fedavg_cluster):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd flashruntime && .venv/bin/pytest tests/integration/test_fedavg_e2e.py -m integration -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/integration/test_fedavg_e2e.py -m integration -v`
 Expected: FAIL — `fixture 'fedavg_cluster' not found`
 
 - [ ] **Step 3: Write the fixture, demo script, and guide**
@@ -1493,16 +1493,16 @@ training rather than faster training (spec §10).
 
 - [ ] **Step 4: Run the demo and the integration test**
 
-Run: `cd flashruntime && .venv/bin/python -u scripts/fedavg_local_demo.py`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -u scripts/fedavg_local_demo.py`
 Expected: 5 rounds print, final loss below the first
 
-Run: `cd flashruntime && .venv/bin/pytest tests/integration/test_fedavg_e2e.py -m integration -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/integration/test_fedavg_e2e.py -m integration -v`
 Expected: 2 passed
 
 - [ ] **Step 5: Run the full suite and docs check**
 
-Run: `cd flashruntime && .venv/bin/pytest -q && .venv/bin/python scripts/build_docs.py --check && ./scripts/audit_secrets.sh`
-Expected: ≥323 passed (plus the ~26 added here), docs check OK, secrets CLEAN
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest -q && .venv/bin/python scripts/build_docs.py --check && ./scripts/audit_secrets.sh`
+Expected: ≥319 pre-existing passed plus the ~40 added by this plan; docs check OK; secrets CLEAN
 
 - [ ] **Step 6: Commit**
 
