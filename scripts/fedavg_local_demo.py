@@ -13,6 +13,17 @@ below the first round's.
 
 Usage:
     PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -u scripts/fedavg_local_demo.py
+
+Runs with credentials enforced too, which is the interesting case: the
+coordinator inherits FLASHML_NODE_TOKENS / FLASHML_OPERATOR_TOKENS from this
+process, so the demo reads the same variables and plays exactly the nodes it
+holds tokens for, while the driver presents its operator token:
+
+    FLASHML_NODE_TOKENS=node-a:tok-a FLASHML_OPERATOR_TOKENS=driver:op-tok \\
+      PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -u scripts/fedavg_local_demo.py
+
+The driver holds no lease — it writes the round's aggregated weights, which
+belong to no task — so it must authenticate as an operator, not as a node.
 """
 
 from __future__ import annotations
@@ -47,9 +58,12 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _req(method: str, url: str, body=None, raw: bytes | None = None):
+def _req(method: str, url: str, body=None, raw: bytes | None = None,
+         token: str | None = None):
     data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
     req = urllib.request.Request(url, data=data, method=method)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
     if data is not None:
         req.add_header("Content-Type",
                        "application/octet-stream" if raw is not None else "application/json")
@@ -58,8 +72,20 @@ def _req(method: str, url: str, body=None, raw: bytes | None = None):
         return r.status, (json.loads(payload) if payload else None)
 
 
-def register_node(base_url: str, node_id: str) -> None:
-    _req("POST", f"{base_url}/v1alpha1/nodes/register", {
+def _tokens_from_env(var: str) -> dict[str, str]:
+    """`name:token` pairs → `{name: token}`, matching service/auth.py."""
+    out: dict[str, str] = {}
+    for pair in (os.environ.get(var) or "").split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        name, _, token = pair.partition(":")
+        out[name.strip()] = token.strip()
+    return out
+
+
+def register_node(base_url: str, node_id: str, token: str | None = None) -> None:
+    _req("POST", f"{base_url}/v1alpha1/nodes/register", token=token, body={
         "schema_version": "v1alpha1",
         "node_id": node_id,
         "kubernetes_node": node_id,
@@ -71,12 +97,13 @@ def register_node(base_url: str, node_id: str) -> None:
     })
 
 
-def run_round_worker(base_url: str, node_id: str, workdir: Path) -> bool:
+def run_round_worker(base_url: str, node_id: str, workdir: Path,
+                     token: str | None = None) -> bool:
     """Claim one task, execute it, upload, commit. False if nothing to claim."""
     from flashml_workloads import fedavg_worker
 
     status, lease = _req("POST", f"{base_url}/v1alpha1/leases/claim",
-                         {"node_id": node_id})
+                         {"node_id": node_id}, token=token)
     if status == 204 or not lease:
         return False
 
@@ -98,12 +125,12 @@ def run_round_worker(base_url: str, node_id: str, workdir: Path) -> bool:
     for f in sorted(outdir.iterdir()):
         raw = f.read_bytes()
         _req("PUT", f"{base_url}/v1alpha1/artifacts/{payload['output_prefix']}{f.name}",
-             raw=raw)
+             raw=raw, token=token)
         if f.name == "metrics.json":
             commit_sha = hashlib.sha256(raw).hexdigest()
 
     _req("POST", f"{base_url}/v1alpha1/attempts/{lease['lease_id']}/complete",
-         {"output_sha256": commit_sha})
+         {"output_sha256": commit_sha}, token=token)
     return True
 
 
@@ -142,20 +169,24 @@ def main() -> int:
                     raise RuntimeError("coordinator did not become healthy in 20s")
                 time.sleep(0.2)
 
-        nodes = ["node-a", "node-b"]
+        # With credentials enforced, the coordinator resolves every node_id
+        # from its token, so the demo can only play the nodes it holds tokens
+        # for. One node still finishes both shards — it claims them in turn.
+        node_tokens = _tokens_from_env("FLASHML_NODE_TOKENS")
+        nodes = sorted(node_tokens) or ["node-a", "node-b"]
         for n in nodes:
-            register_node(base_url, n)
-        (tmp / "a").mkdir()
-        (tmp / "b").mkdir()
-        print(f"registered {len(nodes)} volunteer nodes: {', '.join(nodes)}")
+            register_node(base_url, n, node_tokens.get(n))
+            (tmp / n).mkdir()
+        print(f"registered {len(nodes)} volunteer nodes: {', '.join(nodes)}"
+              + (" (authenticated)" if node_tokens else ""))
 
         stop = threading.Event()
 
         def agent_loop() -> None:
             while not stop.is_set():
-                if not run_round_worker(base_url, "node-a", tmp / "a"):
-                    if not run_round_worker(base_url, "node-b", tmp / "b"):
-                        time.sleep(0.1)
+                if not any(run_round_worker(base_url, n, tmp / n, node_tokens.get(n))
+                           for n in nodes):
+                    time.sleep(0.1)
 
         t = threading.Thread(target=agent_loop, daemon=True)
         t.start()
@@ -171,9 +202,21 @@ def main() -> int:
                   f"participants {result['participants']}/{NUM_SHARDS}  "
                   f"mean_loss {result['mean_loss']:.4f}")
 
+        # The driver aggregates the round and writes jobs/{job}/round-NNN/
+        # weights.json — a key that belongs to no task, so no lease can cover
+        # it. It authenticates as an OPERATOR: attributable, but not
+        # lease-scoped. This is the credential a real deployment gives the
+        # cloud API, never a volunteer.
+        operator_tokens = _tokens_from_env("FLASHML_OPERATOR_TOKENS")
+        driver_headers = (
+            {"Authorization": f"Bearer {sorted(operator_tokens.items())[0][1]}"}
+            if operator_tokens else None
+        )
+
         try:
             result = run_fedavg(
-                HttpCoordinator(base_url), rounds=ROUNDS, num_shards=NUM_SHARDS,
+                HttpCoordinator(base_url, headers=driver_headers),
+                rounds=ROUNDS, num_shards=NUM_SHARDS,
                 min_participants=MIN_PARTICIPANTS, worker_params=WORKER_PARAMS,
                 initial_weights=_initial_weights(),
                 round_timeout_s=120.0, poll_seconds=0.25,

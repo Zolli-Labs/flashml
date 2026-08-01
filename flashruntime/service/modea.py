@@ -377,6 +377,27 @@ def _bearer(request: Request) -> str | None:
     return token.strip() if scheme.lower() == "bearer" and token.strip() else None
 
 
+def _is_operator(state, token: str | None) -> bool:
+    """Is this a driver credential (authenticated, attributable, unscoped)?
+
+    Read defensively: the cloud supplies its own authenticator (Plan 3), and
+    one written before this concept existed has no `is_operator`. A missing
+    or non-bool answer means "no operators here" — the confinement stays on.
+    """
+    checker = getattr(state.authenticator, "is_operator", None)
+    if checker is None:
+        return False
+    return checker(token) is True
+
+
+def _authenticated_node(state, token: str | None) -> str:
+    """The caller's node_id, or 401. Callers must have checked `enforcing`."""
+    node_id = state.authenticator.authenticate(token)
+    if not isinstance(node_id, str) or not node_id:
+        raise HTTPException(status_code=401, detail="invalid or missing node token")
+    return node_id
+
+
 def _authorize_write(state, manager, request: Request, key: str) -> None:
     """Confine a write to the tasks this caller currently holds.
 
@@ -384,12 +405,18 @@ def _authorize_write(state, manager, request: Request, key: str) -> None:
     must keep working (CLAUDE.md rule 4). When enforcing, an unknown caller is
     401 and an out-of-scope key is 403 — distinct so an operator can tell a
     misconfigured agent from a misbehaving one.
+
+    An *operator* token passes unscoped: a driver (fedavg/K-means reducer)
+    runs inside the trusted API, holds no lease, and must still write
+    `jobs/{job}/round-NNN/weights.json`. That is a second credential class,
+    not an exemption — the caller is still authenticated and attributable.
     """
     if not state.authenticator.enforcing:
         return
-    node_id = state.authenticator.authenticate(_bearer(request))
-    if node_id is None:
-        raise HTTPException(status_code=401, detail="invalid or missing node token")
+    token = _bearer(request)
+    if _is_operator(state, token):
+        return
+    node_id = _authenticated_node(state, token)
     # Trailing slash is load-bearing: without it `jobs/j/trial-000extra/...`
     # would satisfy a `jobs/j/trial-000` prefix test.
     allowed = [f"jobs/{job}/{task}/" for job, task in manager.live_leases_for_node(node_id)]
@@ -405,13 +432,39 @@ def authorize_task_write(state, manager, request: Request, job_id: str, task_id:
     directly instead of reconstructing a key prefix."""
     if not state.authenticator.enforcing:
         return
-    node_id = state.authenticator.authenticate(_bearer(request))
-    if node_id is None:
-        raise HTTPException(status_code=401, detail="invalid or missing node token")
+    token = _bearer(request)
+    if _is_operator(state, token):
+        return
+    node_id = _authenticated_node(state, token)
     if (job_id, task_id) not in manager.live_leases_for_node(node_id):
         raise HTTPException(
             status_code=403,
             detail=f"node {node_id} holds no live lease on {job_id}/{task_id}",
+        )
+
+
+def _require_lease_holder(state, manager, request: Request, lease_id: str) -> None:
+    """Only the node that was issued a lease may drive its lifecycle.
+
+    Without this, `complete`/`fail`/`heartbeat` take a lease_id and check
+    nothing: an attacker fails another node's attempt over and over until the
+    task requeues to *him*, then writes his poison entirely within the write
+    scoping above. Scoping writes without owning the lifecycle just moves the
+    hole down one layer.
+
+    Operator tokens are NOT accepted here. A driver holds no lease; letting
+    an unscoped credential fail somebody's attempt would re-open exactly the
+    requeue attack this closes.
+    """
+    if not state.authenticator.enforcing:
+        return
+    node_id = _authenticated_node(state, _bearer(request))
+    lease = manager.lease_info(lease_id)
+    if lease is None or getattr(lease, "node_id", None) != node_id:
+        # 403 for unknown as well as not-yours: a 404/403 split would tell an
+        # attacker which lease ids exist.
+        raise HTTPException(
+            status_code=403, detail=f"node {node_id} does not hold lease {lease_id}"
         )
 
 
@@ -427,13 +480,25 @@ def build_router(state: ModeAState) -> APIRouter:
             supplied = request.headers.get("X-FlashML-Join-Code")
             if supplied != state.join_code:
                 raise HTTPException(status_code=403, detail="invalid or missing join code")
+        if state.authenticator.enforcing:
+            # Identity comes from the credential, never from the body — a node
+            # must not be able to register (and so claim work) as another.
+            reg = reg.model_copy(
+                update={"node_id": _authenticated_node(state, _bearer(request))}
+            )
         state.nodes[reg.node_id] = _NodeEntry(
             registration=reg, last_heartbeat=datetime.now(timezone.utc)
         )
         return {"node_id": reg.node_id, "status": "registered"}
 
     @router.post("/nodes/{node_id}/heartbeat")
-    async def node_heartbeat(node_id: str, hb: NodeHeartbeat):
+    async def node_heartbeat(node_id: str, hb: NodeHeartbeat, request: Request):
+        if state.authenticator.enforcing:
+            caller = _authenticated_node(state, _bearer(request))
+            if caller != node_id:
+                raise HTTPException(
+                    status_code=403, detail="a node may only heartbeat itself"
+                )
         entry = state.nodes.get(node_id)
         if entry is None:
             raise HTTPException(status_code=404, detail=f"unknown node {node_id} — register first")
@@ -447,7 +512,12 @@ def build_router(state: ModeAState) -> APIRouter:
     # -- leases -------------------------------------------------------------
 
     @router.post("/leases/claim")
-    async def claim(req: ClaimRequest):
+    async def claim(req: ClaimRequest, request: Request):
+        if state.authenticator.enforcing:
+            # Overwrite rather than validate-and-reject: a body node_id is
+            # simply not authoritative, so a disagreement is not an error to
+            # report — there is nothing here to disagree with.
+            req.node_id = _authenticated_node(state, _bearer(request))
         entry = state.nodes.get(req.node_id)
         if entry is None:
             raise HTTPException(status_code=403, detail="unregistered node — register first")
@@ -469,9 +539,12 @@ def build_router(state: ModeAState) -> APIRouter:
         return lease
 
     @router.post("/attempts/{lease_id}/heartbeat")
-    async def attempt_heartbeat(lease_id: str):
+    async def attempt_heartbeat(lease_id: str, request: Request):
         from flashruntime.leases import LeaseError
 
+        # Same ownership rule as complete/fail: keeping somebody else's lease
+        # alive stops the sweeper from ever requeueing their stalled task.
+        _require_lease_holder(state, manager, request, lease_id)
         try:
             return manager.heartbeat(lease_id)
         except LeaseError as exc:
@@ -479,9 +552,10 @@ def build_router(state: ModeAState) -> APIRouter:
             raise HTTPException(status_code=410, detail=str(exc))
 
     @router.post("/attempts/{lease_id}/complete")
-    async def attempt_complete(lease_id: str, req: CompleteRequest):
+    async def attempt_complete(lease_id: str, req: CompleteRequest, request: Request):
         from flashruntime.leases import LeaseError
 
+        _require_lease_holder(state, manager, request, lease_id)
         lease = manager.lease_info(lease_id)
         if lease is None:
             raise HTTPException(status_code=404, detail=f"unknown lease {lease_id}")
@@ -515,9 +589,10 @@ def build_router(state: ModeAState) -> APIRouter:
         return {"accepted": accepted}
 
     @router.post("/attempts/{lease_id}/fail")
-    async def attempt_fail(lease_id: str, req: FailRequest):
+    async def attempt_fail(lease_id: str, req: FailRequest, request: Request):
         from flashruntime.leases import LeaseError
 
+        _require_lease_holder(state, manager, request, lease_id)
         try:
             manager.fail(lease_id, req.reason)
         except LeaseError as exc:
@@ -551,6 +626,8 @@ def build_router(state: ModeAState) -> APIRouter:
     @router.put("/artifacts/{key:path}")
     async def put_artifact(key: str, request: Request):
         key = _safe_key(key)
+        # Checked TWICE, on purpose. The first call rejects an unauthorized
+        # caller before we buffer a body that may be hundreds of megabytes.
         _authorize_write(state, manager, request, key)
         data = await request.body()
         if len(data) > state.max_artifact_bytes:
@@ -558,6 +635,15 @@ def build_router(state: ModeAState) -> APIRouter:
                 status_code=413,
                 detail=f"artifact exceeds {state.max_artifact_bytes} bytes",
             )
+        # ...and the second closes the TOCTOU window between them. Reading the
+        # body takes as long as the client wants it to: a node can claim a
+        # task, open a chunked PUT, trickle bytes while the sweeper expires
+        # its lease and another node completes and commits the task — and
+        # then land its body on top of the committed result. That window is
+        # attacker-controlled, not bounded by the lease duration, and it
+        # defeats revocation entirely. `live_leases_for_node` stops covering
+        # a completed or reclaimed task, so re-checking here is the fix.
+        _authorize_write(state, manager, request, key)
         path = state.artifacts_dir / key
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
