@@ -195,8 +195,11 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
     """
     p = spec.spec.workload.parameters
     num_shards = int(p.get("num_shards", 0))
-    if num_shards < 1:
-        raise ExpansionError(f"federated_averaging needs num_shards >= 1, got {num_shards}")
+    if num_shards < 1 or num_shards > 999:
+        raise ExpansionError(
+            f"federated_averaging needs 1 <= num_shards <= 999, got {num_shards} "
+            "(task ids are zero-padded to 3 digits and are sorted as strings)"
+        )
 
     inputs: dict[str, str] = {}
     weights = p.get("weights")

@@ -64,6 +64,23 @@ def test_rejects_zero_shards():
         expand_tasks("job-1", _spec(num_shards=0))
 
 
+def test_rejects_more_than_999_shards():
+    """Task ids are zero-padded to 3 digits (shard-000..shard-999) and the
+    driver sorts them as strings when collecting a round's results. Above
+    999 shards, "shard-1000" < "shard-999" lexically, scrambling the
+    participant order and (since float summation isn't associative) making
+    the aggregate non-reproducible run to run. Fail closed instead of
+    silently widening the padding, which just moves the cliff."""
+    with pytest.raises(ExpansionError, match="num_shards"):
+        expand_tasks("job-1", _spec(num_shards=1000))
+
+
+def test_accepts_999_shards_the_upper_boundary():
+    tasks = expand_tasks("job-1", _spec(num_shards=999))
+    assert len(tasks) == 999
+    assert tasks[-1].task_id == "shard-998"
+
+
 def test_rejects_a_spec_missing_worker_parameters():
     """fedavg_worker reads every one of these unconditionally. Omitting the
     check would defer the failure to a KeyError inside a container on a
