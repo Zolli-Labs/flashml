@@ -1,5 +1,7 @@
 import json
 import time
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -269,6 +271,39 @@ def test_http_coordinator_sends_auth_headers(monkeypatch):
     assert captured["url"] == "http://c:8100/v1alpha1/jobs"
 
 
+def test_http_coordinator_sends_auth_headers_on_every_method(monkeypatch):
+    """submit is not the only call the cloud API's credential travels
+    through — job_state/artifacts/get_artifact/put_artifact all pass
+    `headers=self.headers` too. A regression dropping the header from any
+    one of them would ship silently unauthenticated in production, so pin
+    all five rather than only the one the earlier test happened to drive.
+    """
+    calls = []
+
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        calls.append({"method": method, "url": url, "headers": headers or {}})
+        if method == "GET" and url.endswith("/v1alpha1/jobs/job-r0"):
+            return {"state": "RUNNING"}
+        if method == "GET" and url.endswith("/artifacts"):
+            return []
+        if method == "GET" and "/v1alpha1/artifacts/" in url:
+            return {"w": {"shape": [1], "data": [1.0]}}
+        return {"job_id": "job-r0"}
+
+    coord = HttpCoordinator("http://c:8100", headers={"Authorization": "Bearer t"})
+    monkeypatch.setattr(coord, "_request", fake_request)
+
+    coord.submit({"spec": {}})
+    coord.job_state("job-r0")
+    coord.artifacts("job-r0")
+    coord.get_artifact("jobs/job-r0/round-000/weights.json")
+    coord.put_artifact("jobs/job-r0/round-000/weights.json", {"w": {}})
+
+    assert len(calls) == 5
+    for call in calls:
+        assert call["headers"]["Authorization"] == "Bearer t", call
+
+
 def test_resume_state_finds_last_completed_round():
     # 42.0 is deliberately unlike any delta value in `commits` — if the fake
     # ever re-derives a delta for this key instead of returning what was PUT,
@@ -317,6 +352,48 @@ def test_resume_state_on_empty_history_starts_at_zero():
     assert resume_state(fake, []) == (0, {}, None)
 
 
+def test_resume_state_raises_on_present_but_empty_weights_artifact():
+    """A key that exists (no ArtifactNotFound) but resolves to `{}` — or
+    `None`, matching `HttpCoordinator._request`'s empty-body-200 case — is
+    not "this round never completed"; it is a corrupt or truncated commit.
+    Silently treating it as absent and walking further back would either
+    redo completed work or resume from stale weights from an earlier
+    round. It must be surfaced, not swallowed.
+    """
+    fake = FakeCoordinator({})
+    fake.uploaded["jobs/job-r0/round-000/weights.json"] = {}
+    with pytest.raises(RuntimeError):
+        resume_state(fake, ["job-r0"])
+
+    fake2 = FakeCoordinator({})
+    fake2.uploaded["jobs/job-r0/round-000/weights.json"] = None
+    with pytest.raises(RuntimeError):
+        resume_state(fake2, ["job-r0"])
+
+
+def test_http_coordinator_get_artifact_maps_404_and_propagates_503(monkeypatch):
+    """Verified only by reading the source until now — drive the real
+    `_request` -> `urllib.request.urlopen` path (stubbing at the urlopen
+    level, not `_request` itself) so the 404 -> ArtifactNotFound mapping
+    and 5xx passthrough are exercised, not just eyeballed.
+    """
+    coord = HttpCoordinator("http://c:8100")
+
+    def raise_404(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_404)
+    with pytest.raises(ArtifactNotFound):
+        coord.get_artifact("jobs/job-r0/round-000/weights.json")
+
+    def raise_503(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", None, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_503)
+    with pytest.raises(urllib.error.HTTPError):
+        coord.get_artifact("jobs/job-r0/round-000/weights.json")
+
+
 def test_run_fedavg_resumes_from_start_round():
     fake = FakeCoordinator({1: [(0, 1.0, 10), (1, 1.0, 10)]})
     result = run_fedavg(fake, rounds=2, num_shards=2, min_participants=2,
@@ -326,3 +403,10 @@ def test_run_fedavg_resumes_from_start_round():
     # Only round 1 runs; weights walk 5.0 -> 6.0
     assert [h["round"] for h in result["history"]] == [1]
     assert result["weights"]["w"]["data"] == [pytest.approx(6.0)]
+    # The resumed round's job must declare the passed-in weights_uri as its
+    # input. Asserting only on history/weights (as above) can't catch a
+    # regression that reintroduces a local `weights_uri = None` alongside
+    # the parameter — every resumed run would silently restart from the
+    # initial model while these two assertions kept passing.
+    params = fake.submitted[0][1]["spec"]["workload"]["parameters"]
+    assert params["weights"] == "artifact://jobs/job-r0/round-000/weights.json"

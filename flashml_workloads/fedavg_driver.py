@@ -23,6 +23,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable, Protocol, TypedDict
 
@@ -160,16 +161,19 @@ class HttpCoordinator:
                              data=json.dumps(body).encode(), headers=self.headers)
 
     def job_state(self, job_id: str) -> str:
-        return self._request("GET", f"{self.base_url}/v1alpha1/jobs/{job_id}",
+        job_id_q = urllib.parse.quote(job_id, safe="/")
+        return self._request("GET", f"{self.base_url}/v1alpha1/jobs/{job_id_q}",
                              headers=self.headers)["state"]
 
     def artifacts(self, job_id: str) -> list[dict]:
-        return self._request("GET", f"{self.base_url}/v1alpha1/jobs/{job_id}/artifacts",
+        job_id_q = urllib.parse.quote(job_id, safe="/")
+        return self._request("GET", f"{self.base_url}/v1alpha1/jobs/{job_id_q}/artifacts",
                              headers=self.headers)
 
     def get_artifact(self, key: str):
+        key_q = urllib.parse.quote(key, safe="/")
         try:
-            return self._request("GET", f"{self.base_url}/v1alpha1/artifacts/{key}",
+            return self._request("GET", f"{self.base_url}/v1alpha1/artifacts/{key_q}",
                                  headers=self.headers)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
@@ -177,7 +181,8 @@ class HttpCoordinator:
             raise   # 5xx / auth failures are NOT "round never completed"
 
     def put_artifact(self, key: str, body) -> None:
-        self._request("PUT", f"{self.base_url}/v1alpha1/artifacts/{key}",
+        key_q = urllib.parse.quote(key, safe="/")
+        self._request("PUT", f"{self.base_url}/v1alpha1/artifacts/{key_q}",
                       data=json.dumps(body).encode(), headers=self.headers)
 
 
@@ -193,6 +198,14 @@ def resume_state(coord: Coordinator, job_ids: list[str]) -> tuple[int, dict, str
     Only ArtifactNotFound is swallowed. A transport error must propagate:
     silently treating an unreachable coordinator as "no rounds done" would
     restart a finished run from scratch.
+
+    An artifact that EXISTS (no ArtifactNotFound) but is falsy — `{}`, or
+    `None` from an empty-body 200 — is a different situation from "this
+    round never completed": something committed a weights key with no
+    usable content. Treating that identically to "keep searching" would
+    silently walk past a corrupt commit and redo already-completed work
+    (or worse, resume from stale weights further back). Surface it instead
+    of guessing.
     """
     for r in range(len(job_ids) - 1, -1, -1):
         key = f"jobs/{job_ids[r]}/round-{r:03d}/weights.json"
@@ -200,8 +213,13 @@ def resume_state(coord: Coordinator, job_ids: list[str]) -> tuple[int, dict, str
             weights = coord.get_artifact(key)
         except ArtifactNotFound:
             continue
-        if weights:
-            return r + 1, weights, f"artifact://{key}"
+        if not weights:
+            raise RuntimeError(
+                f"weights artifact at {key!r} exists but is empty; "
+                "cannot distinguish a corrupt commit from a round that "
+                "never completed"
+            )
+        return r + 1, weights, f"artifact://{key}"
     return 0, {}, None
 
 
