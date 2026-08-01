@@ -22,10 +22,46 @@ commands:
   agent     run the node agent loop (register with FlashML Cloud + heartbeat)
   work      register with a FlashRuntime coordinator and execute leased tasks
             (--coordinator URL | FLASHNODE_COORDINATOR_URL; --max-tasks N)
+  login     save a bearer token for a FlashRuntime coordinator
+            (--coordinator URL --token TOKEN)
+  logout    remove the saved bearer token for a FlashRuntime coordinator
+            (--coordinator URL)
   join      connect this machine to a FlashML control plane (not yet implemented)
   status    show node identity, capabilities, and active leases (not yet implemented)
   leave     drain and disconnect (not yet implemented)
 """
+
+
+def _login(args: list[str]) -> int:
+    import argparse
+
+    from flashnode.identity.credentials import save_token
+
+    parser = argparse.ArgumentParser(prog="flashnode login")
+    parser.add_argument("--coordinator", required=True, help="FlashRuntime coordinator base URL")
+    parser.add_argument("--token", required=True, help="bearer token issued by the coordinator")
+    opts = parser.parse_args(args)
+
+    path = save_token(opts.coordinator, opts.token)
+    print(f"flashnode login: credential saved to {path}", file=sys.stderr)
+    return 0
+
+
+def _logout(args: list[str]) -> int:
+    import argparse
+
+    from flashnode.identity.credentials import clear_token, credentials_path
+
+    parser = argparse.ArgumentParser(prog="flashnode logout")
+    parser.add_argument("--coordinator", required=True, help="FlashRuntime coordinator base URL")
+    opts = parser.parse_args(args)
+
+    removed = clear_token(opts.coordinator)
+    if removed:
+        print(f"flashnode logout: credential removed from {credentials_path()}", file=sys.stderr)
+    else:
+        print(f"flashnode logout: no saved credential for {opts.coordinator}", file=sys.stderr)
+    return 0
 
 
 def _work(args: list[str]) -> int:
@@ -105,9 +141,13 @@ def _work(args: list[str]) -> int:
 
     workdir_base = os.environ.get("FLASHNODE_WORKDIR") or None
 
+    from flashnode.identity.credentials import load_token
+
     node_id = load_or_create_node_id()
     client = CoordinatorClient(
-        opts.coordinator, join_code=os.environ.get("FLASHNODE_JOIN_CODE") or None
+        opts.coordinator,
+        join_code=os.environ.get("FLASHNODE_JOIN_CODE") or None,
+        token=load_token(opts.coordinator),
     )
     registration = discover(
         node_id, kubernetes_node="", node_meta=None,
@@ -144,6 +184,10 @@ def main(argv: list[str] | None = None) -> int:
         return agent_main()
     if args and args[0] == "work":
         return _work(args[1:])
+    if args and args[0] == "login":
+        return _login(args[1:])
+    if args and args[0] == "logout":
+        return _logout(args[1:])
     print(USAGE.format(version=__version__), end="")
     if args and args[0] in {"join", "status", "leave"}:
         print(f"\nerror: '{args[0]}' is not implemented yet in this scaffold.", file=sys.stderr)

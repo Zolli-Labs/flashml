@@ -27,10 +27,29 @@ class LeaseLost(Exception):
 
 
 class CoordinatorClient:
-    def __init__(self, base_url: str, timeout: float = 15.0, join_code: str | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 15.0,
+        join_code: str | None = None,
+        token: str | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.join_code = join_code  # sent on register when the pool requires one
+        self._token = token  # bearer credential for every authenticated call
+
+    # -- auth -----------------------------------------------------------------
+
+    def _headers(self) -> dict[str, str]:
+        """Auth header merged into every request this class makes.
+
+        Empty when no token is configured — correct for the self-hosted open
+        profile, where absence of a credential simply means no header.
+        """
+        if self._token:
+            return {"Authorization": f"Bearer {self._token}"}
+        return {}
 
     # -- transport (patchable in tests) -------------------------------------
 
@@ -42,7 +61,8 @@ class CoordinatorClient:
         content_type: str = "application/json",
         headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
-        all_headers = dict(headers or {})
+        all_headers = self._headers()
+        all_headers.update(headers or {})
         if body is not None:
             all_headers["Content-Type"] = content_type
         req = urllib.request.Request(
