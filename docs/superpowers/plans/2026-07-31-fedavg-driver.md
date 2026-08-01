@@ -316,7 +316,7 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_weights.py -v`
-Expected: 14 passed
+Expected: 16 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1063,6 +1063,38 @@ def test_each_round_declares_previous_round_weights_as_input():
     assert second["weights"].startswith("artifact://")
 
 
+def test_rejects_a_task_declaring_a_traversing_delta_file():
+    """metrics.json is written by an untrusted volunteer node. A delta_file
+    naming another job's artifact must be refused, not averaged in."""
+    from flashml_workloads.fedavg_driver import _safe_delta_key
+
+    for evil in ("../../other-job/weights.json", "a/b.json", "..", ""):
+        with pytest.raises(ValueError, match="unsafe delta_file"):
+            _safe_delta_key("jobs/job-r0/shard-000/metrics.json", evil)
+
+    assert _safe_delta_key("jobs/job-r0/shard-000/metrics.json", "delta.json") == \
+        "jobs/job-r0/shard-000/delta.json"
+
+
+def test_deltas_are_not_downloaded_until_quorum_is_reached():
+    """Deltas are megabytes; re-fetching them on every poll tick would
+    dominate the round's transfer cost."""
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+    fetched = []
+    real_get = fake.get_artifact
+    fake.get_artifact = lambda k: (fetched.append(k), real_get(k))[1]
+
+    run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+               worker_params=_params(),
+               initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+    # Exactly one metrics + one delta read per participant, no repeats.
+    assert sorted(fetched) == sorted([
+        "jobs/job-r0/shard-000/metrics.json", "jobs/job-r0/shard-000/delta.json",
+        "jobs/job-r0/shard-001/metrics.json", "jobs/job-r0/shard-001/delta.json",
+    ])
+
+
 def test_on_round_callback_receives_progress():
     seen = []
     fake = FakeCoordinator({r: [(0, 1.0, 10), (1, 1.0, 10)] for r in range(2)})
@@ -1164,15 +1196,40 @@ def _round_body(round_idx: int, num_shards: int, worker_params: dict,
     }
 
 
-def _collect(coord: Coordinator, job_id: str) -> list[tuple[dict, int, float]]:
-    """Committed (delta, samples, loss) triples for a round, so far."""
+def _committed_metrics_keys(coord: Coordinator, job_id: str) -> list[str]:
+    """Keys of the round's committed metrics.json artifacts.
+
+    Cheap: one listing call. Kept separate from `_fetch` so the quorum poll
+    does not re-download every delta on every tick — deltas are megabytes,
+    and polling re-fetching them would dominate the round's transfer cost.
+    """
+    return sorted(a["key"] for a in coord.artifacts(job_id)
+                  if a["key"].endswith("metrics.json"))
+
+
+def _safe_delta_key(metrics_key: str, delta_file: str) -> str:
+    """Resolve a task's declared delta filename inside its own output prefix.
+
+    `delta_file` comes from metrics.json, which is written by an UNTRUSTED
+    volunteer node. Without this check a malicious node could name
+    `../../other-job/weights.json` and make the driver read — and average
+    in — an artifact belonging to somebody else's job. Result verification
+    is M3; this is not that, it is basic path containment and belongs here.
+    """
+    if "/" in delta_file or "\\" in delta_file or delta_file in ("", ".", ".."):
+        raise ValueError(
+            f"task declared an unsafe delta_file {delta_file!r}: "
+            "must be a plain filename in the task's own output prefix"
+        )
+    return metrics_key.rsplit("/", 1)[0] + "/" + delta_file
+
+
+def _fetch(coord: Coordinator, metrics_keys: list[str]) -> list[tuple[dict, int, float]]:
+    """Download (delta, samples, loss) for the keys that met quorum."""
     out = []
-    for a in coord.artifacts(job_id):
-        key = a["key"]
-        if not key.endswith("metrics.json"):
-            continue
+    for key in metrics_keys:
         metrics = coord.get_artifact(key)
-        delta_key = key.rsplit("/", 1)[0] + "/" + metrics.get("delta_file", "delta.json")
+        delta_key = _safe_delta_key(key, metrics.get("delta_file", "delta.json"))
         out.append((coord.get_artifact(delta_key),
                     int(metrics["samples"]), float(metrics["loss"])))
     return out
@@ -1210,26 +1267,28 @@ def run_fedavg(
         job_ids.append(job_id)
 
         deadline = time.monotonic() + round_timeout_s
-        collected: list[tuple[dict, int, float]] = []
+        keys: list[str] = []
         while True:
-            collected = _collect(coord, job_id)
-            if len(collected) >= min_participants:
+            keys = _committed_metrics_keys(coord, job_id)
+            if len(keys) >= min_participants:
                 break
             state = coord.job_state(job_id)
             if state in ("FAILED", "CANCELLED"):
                 raise QuorumNotMet(
                     f"round {r}: job {job_id} ended {state} with "
-                    f"{len(collected)} of {min_participants} needed"
+                    f"{len(keys)} of {min_participants} needed"
                 )
             if time.monotonic() > deadline:
                 raise QuorumNotMet(
-                    f"round {r}: timed out with {len(collected)} of "
+                    f"round {r}: timed out with {len(keys)} of "
                     f"{min_participants} needed ({num_shards} shards dispatched)"
                 )
             time.sleep(poll_seconds)
 
-        # Anything committing from here on is discarded by construction: we
-        # never re-read this job after aggregating.
+        # Freeze the participant set at the moment quorum was reached, then
+        # download. Anything committing from here on is discarded by
+        # construction: we never re-read this job after aggregating.
+        collected = _fetch(coord, keys)
         reduced = reduce_deltas([(d, n) for d, n, _ in collected])
         weights = apply_delta(weights, reduced)
 
@@ -1468,7 +1527,7 @@ comes from the parameter).
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_driver.py -v`
-Expected: 14 passed
+Expected: 16 passed
 
 - [ ] **Step 5: Commit**
 
