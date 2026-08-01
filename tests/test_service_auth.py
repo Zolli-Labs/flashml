@@ -70,3 +70,17 @@ def test_env_rejects_a_duplicate_token_across_nodes():
     """Two nodes sharing a token makes attribution — and revocation — a lie."""
     with pytest.raises(AuthConfigError, match="duplicate token"):
         authenticator_from_env({"FLASHML_NODE_TOKENS": "node-a:same,node-b:same"})
+
+
+def test_open_authenticator_enforcing_is_read_only():
+    """The enforcing property must not be assignable on a live instance."""
+    a = OpenAuthenticator()
+    with pytest.raises(AttributeError):
+        a.enforcing = True
+
+
+def test_static_authenticator_enforcing_is_read_only():
+    """The enforcing property must not be assignable on a live instance."""
+    a = StaticTokenAuthenticator({"tok-a": "node-a"})
+    with pytest.raises(AttributeError):
+        a.enforcing = False

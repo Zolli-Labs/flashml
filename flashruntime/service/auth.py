@@ -47,7 +47,9 @@ class OpenAuthenticator:
     """Self-hosted default: no credentials, no scoping. Behavior identical to
     the coordinator before this seam existed."""
 
-    enforcing = False
+    @property
+    def enforcing(self) -> bool:
+        return False
 
     def authenticate(self, token: str | None) -> str | None:  # noqa: ARG002
         return None
@@ -57,7 +59,9 @@ class StaticTokenAuthenticator:
     """Token → node_id from configuration. The self-hosted multi-machine case,
     and the test double for the cloud's authenticator."""
 
-    enforcing = True
+    @property
+    def enforcing(self) -> bool:
+        return True
 
     def __init__(self, tokens: dict[str, str]):
         for token, node_id in tokens.items():
