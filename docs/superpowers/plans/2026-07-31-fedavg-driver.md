@@ -316,7 +316,7 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_weights.py -v`
-Expected: 16 passed
+Expected: 20 passed (13 pre-existing + 7 new)
 
 - [ ] **Step 5: Commit**
 
@@ -1566,7 +1566,7 @@ comes from the parameter).
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_driver.py -v`
-Expected: 16 passed
+Expected: 20 passed (13 pre-existing + 7 new)
 
 - [ ] **Step 5: Commit**
 
