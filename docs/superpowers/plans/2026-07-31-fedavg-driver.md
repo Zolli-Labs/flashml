@@ -792,6 +792,15 @@ def test_rejects_zero_shards():
         expand_tasks("job-1", _spec(num_shards=0))
 
 
+def test_rejects_more_shards_than_the_id_padding_can_order():
+    """Task ids are zero-padded to 3 digits and the driver sorts them as
+    strings, so "shard-1000" would sort before "shard-999". Both boundaries
+    are asserted — checking only 1000 would pass against an off-by-one."""
+    with pytest.raises(ExpansionError, match="num_shards"):
+        expand_tasks("job-1", _spec(num_shards=1000))
+    assert len(expand_tasks("job-1", _spec(num_shards=999))) == 999
+
+
 def test_rejects_a_spec_missing_worker_parameters():
     """fedavg_worker reads every one of these unconditionally. Omitting the
     check would defer the failure to a KeyError inside a container on a
@@ -848,8 +857,17 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
     """
     p = spec.spec.workload.parameters
     num_shards = int(p.get("num_shards", 0))
-    if num_shards < 1:
-        raise ExpansionError(f"federated_averaging needs num_shards >= 1, got {num_shards}")
+    if num_shards < 1 or num_shards > 999:
+        # Upper bound is not arbitrary: task ids are zero-padded to 3 digits
+        # and the driver SORTS these keys when collecting a round. Past 999,
+        # "shard-1000" < "shard-999" as strings, so participants would be
+        # assembled out of order — and float summation is not associative, so
+        # the aggregate would stop being reproducible. Fail closed rather than
+        # widening the padding, which only moves the cliff.
+        raise ExpansionError(
+            f"federated_averaging needs 1 <= num_shards <= 999, got {num_shards} "
+            "(task ids are zero-padded to 3 digits and are sorted as strings)"
+        )
 
     inputs: dict[str, str] = {}
     weights = p.get("weights")
@@ -906,7 +924,7 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_service_fedavg.py tests/test_service_modea.py -v`
-Expected: 9 new passed; `test_service_modea.py` unchanged and green
+Expected: 10 new passed; `test_service_modea.py` unchanged and green
 
 - [ ] **Step 5: Commit**
 
