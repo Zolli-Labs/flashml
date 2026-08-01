@@ -41,6 +41,8 @@ flashnode work --coordinator http://<coordinator>:8100
 #   FLASHNODE_JOIN_CODE=...          join-code-gated pools
 #   --runner docker + FLASHNODE_ALLOWED_IMAGES=img:tag,...   container tier
 #   FLASHNODE_WORKDIR=$HOME/.cache/flashnode   (macOS + colima: VM-visible workdirs)
+#   FLASHNODE_WORKDIR=C:\Users\<you>\.flashnode  (Windows: must be under a
+#                                                 directory Docker Desktop shares)
 ```
 
 If the coordinator enforces per-machine authentication
@@ -100,8 +102,18 @@ richer telemetry (`telemetry/`), gVisor/Kata isolation tiers, and the
 - Complete event logging of task assignment, image digest, permissions, and
   artifact commits.
 
-Supported host class (initial): x86-64 Linux, Python 3.10+, Docker or
-Podman, ≥4 CPU cores, ≥8 GB RAM, stable outbound internet.
+Supported host class (initial): x86-64 Linux, macOS (Docker Desktop or
+Colima), or Windows (Docker Desktop with the **WSL2 backend**), Python
+3.10+, ≥4 CPU cores, ≥8 GB RAM, stable outbound internet.
+
+**Windows note:** `flashnode work` used to crash immediately on Windows
+(`os.getuid`/`os.getgid` don't exist there). It now omits `--user` on
+Windows instead, relying on the curated images' own non-root `USER`
+declaration for non-root execution — see
+[`docs/guides/donate-a-machine.md`](https://github.com/Zolli-Labs/flashruntime/blob/main/docs/guides/donate-a-machine.md#platform-support)
+in flashruntime for the full picture, including honest caveats: **Windows
+support is constructed-argv-verified (tests fake the platform), not yet
+execution-verified against a real Windows machine.**
 
 ## Package layout
 
