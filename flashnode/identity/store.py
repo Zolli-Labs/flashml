@@ -12,11 +12,26 @@ import os
 import uuid
 from pathlib import Path
 
-DEFAULT_STATE_DIR = "/var/lib/flashnode"
+# Per-user, not system-wide. /var/lib/flashnode was the default and is not
+# writable by an ordinary account on macOS or Windows, so the very first
+# command a volunteer runs died with
+#   PermissionError: [Errno 13] Permission denied: '/var/lib/flashnode'
+# before enrolment could start, and with nothing to suggest that a directory
+# choice was the problem.
+#
+# ~/.flashnode also matches where the credential store already writes
+# (identity/credentials.py), so a machine's identity and its token sit
+# together and `rm -rf ~/.flashnode` fully un-enrols it.
+#
+# The Kubernetes profile sets FLASHNODE_STATE_DIR explicitly
+# (flashml-cloud/infra/base/flashnode.yaml) to a hostPath volume, so there
+# the ID still survives pod restarts and still identifies the *node*.
+DEFAULT_STATE_DIR = "~/.flashnode"
 
 
 def state_dir() -> Path:
-    return Path(os.environ.get("FLASHNODE_STATE_DIR", DEFAULT_STATE_DIR))
+    raw = os.environ.get("FLASHNODE_STATE_DIR") or DEFAULT_STATE_DIR
+    return Path(raw).expanduser()
 
 
 def load_or_create_node_id() -> str:

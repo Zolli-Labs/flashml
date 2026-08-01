@@ -22,8 +22,8 @@ commands:
   agent     run the node agent loop (register with FlashML Cloud + heartbeat)
   work      register with a FlashRuntime coordinator and execute leased tasks
             (--coordinator URL | FLASHNODE_COORDINATOR_URL; --max-tasks N)
-  login     save a bearer token for a FlashRuntime coordinator
-            (--coordinator URL --token TOKEN)
+  login     enrol this machine — prints a code to approve in a browser
+            (--coordinator URL; --token TOKEN to skip the browser step)
   logout    remove the saved bearer token for a FlashRuntime coordinator
             (--coordinator URL)
   join      connect this machine to a FlashML control plane (not yet implemented)
@@ -33,17 +33,103 @@ commands:
 
 
 def _login(args: list[str]) -> int:
+    """Enrol this machine.
+
+    The default path is device-code: print a short code, wait for a
+    signed-in human to approve it in a browser, save the token that comes
+    back. That is what the console tells volunteers to run, and until now it
+    could not work — `--token` was REQUIRED, and the enrolment flow issues
+    no token for anyone to paste. The API half (/v1alpha1/device/code,
+    /v1alpha1/device/token) had been built and simply had no client.
+
+    `--token` stays supported for a credential you already hold: CI, a
+    self-hosted coordinator, or re-pointing a machine with no browser to
+    hand.
+    """
     import argparse
 
     from flashnode.identity.credentials import save_token
 
-    parser = argparse.ArgumentParser(prog="flashnode login")
-    parser.add_argument("--coordinator", required=True, help="FlashRuntime coordinator base URL")
-    parser.add_argument("--token", required=True, help="bearer token issued by the coordinator")
+    parser = argparse.ArgumentParser(
+        prog="flashnode login",
+        description="Enrol this machine with FlashML.",
+    )
+    parser.add_argument(
+        "--coordinator",
+        required=True,
+        help="FlashML Cloud API base URL (e.g. https://flashml-api.onrender.com)",
+    )
+    parser.add_argument(
+        "--token",
+        help="skip the browser step and save a token you already have",
+    )
     opts = parser.parse_args(args)
 
-    path = save_token(opts.coordinator, opts.token)
-    print(f"flashnode login: credential saved to {path}", file=sys.stderr)
+    if opts.token:
+        path = save_token(opts.coordinator, opts.token)
+        print(f"flashnode login: credential saved to {path}", file=sys.stderr)
+        return 0
+
+    from flashnode.identity.enrol import (
+        EnrolmentError,
+        describe_this_machine,
+        poll_for_token,
+        request_device_code,
+    )
+    from flashnode.identity.store import load_or_create_node_id
+
+    try:
+        node_id = load_or_create_node_id()
+    except OSError as exc:
+        print(
+            f"flashnode login: cannot write this machine's identity: {exc}\n"
+            "Set FLASHNODE_STATE_DIR to a directory you can write to.",
+            file=sys.stderr,
+        )
+        return 1
+
+    hostname, platform_name = describe_this_machine()
+
+    try:
+        start = request_device_code(
+            opts.coordinator, node_id, hostname, platform_name
+        )
+    except EnrolmentError as exc:
+        print(f"flashnode login: {exc}", file=sys.stderr)
+        return 1
+
+    # stdout, not stderr: this is the output the person is here for, and it
+    # should survive being piped.
+    #
+    # flush=True is load-bearing. Python block-buffers stdout when it is not
+    # a terminal, so piping `flashnode login` anywhere — tee, a log, a setup
+    # script — showed nothing at all while the process sat waiting for an
+    # approval of a code it had never displayed.
+    print(flush=True)
+    print(f"  Your code:  {start.user_code}", flush=True)
+    print(f"  Approve at: {start.verification_uri}", flush=True)
+    print(flush=True)
+    print(
+        "Open that on any device you're signed in on — your phone is fine.",
+        flush=True,
+    )
+    print("Waiting for approval… (Ctrl-C to cancel)", flush=True)
+
+    try:
+        token = poll_for_token(
+            opts.coordinator, start.device_code, interval=start.interval
+        )
+    except EnrolmentError as exc:
+        print(f"\nflashnode login: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        # Cancelling is a normal act, not a crash. The code expires unused.
+        print("\nflashnode login: cancelled.", file=sys.stderr)
+        return 130
+
+    path = save_token(opts.coordinator, token)
+    print(f"\nApproved. This machine is enrolled — credential saved to {path}.")
+    print("Start contributing with:  flashnode work --runner docker")
     return 0
 
 
