@@ -42,6 +42,42 @@ class CommandRecipe(WorkloadRecipe):
             or not all(isinstance(p, dict) for p in task_params)
         ):
             problems.append("'task_params' must be a list of objects")
+        problems.extend(self._unpack_problems(params))
+        return problems
+
+    @staticmethod
+    def _unpack_problems(params: dict[str, Any]) -> list[str]:
+        """Validate `unpack_inputs` — the names flashnode may run an archive
+        extractor over.
+
+        This value decides which downloaded bytes get unpacked into a
+        directory tree on a *volunteer's* machine, so it is validated at
+        expansion time rather than forwarded as given. Naming an input that
+        was never declared is the interesting case: flashnode refuses it
+        too, but only after the task has been leased, claimed and half-run,
+        which surfaces to the submitter as a mysterious node-side failure
+        instead of the spec error it is. Catching it here fails on the
+        submitter's side, before anything is placed.
+        """
+        unpack = params.get("unpack_inputs")
+        if unpack is None:
+            return []
+        if not isinstance(unpack, list) or not all(isinstance(n, str) for n in unpack):
+            return ["'unpack_inputs' must be a list of input names (strings)"]
+        problems: list[str] = []
+        duplicates = sorted({n for n in unpack if unpack.count(n) > 1})
+        if duplicates:
+            problems.append(
+                f"'unpack_inputs' names {duplicates} more than once — an input "
+                f"is unpacked at most once"
+            )
+        declared = set((params.get("inputs") or {}).keys())
+        unknown = sorted(set(unpack) - declared)
+        if unknown:
+            problems.append(
+                f"'unpack_inputs' names inputs that are not declared in "
+                f"'inputs': {unknown}"
+            )
         return problems
 
     def expand(self, job_id: str, spec: JobSpec) -> list[TaskSpec]:
@@ -103,6 +139,13 @@ class CommandRecipe(WorkloadRecipe):
             }
             if p.get("checkpoint") is not None:
                 payload["checkpoint"] = p["checkpoint"]
+            if p.get("unpack_inputs") is not None:
+                # Absent stays absent, never an empty list: flashnode reads
+                # `payload.get("unpack_inputs")` and an omitted key is the
+                # path where every input keeps its plain-file behaviour byte
+                # for byte. Emitting `[]` would mean the same thing today but
+                # would stop exercising that path.
+                payload["unpack_inputs"] = list(p["unpack_inputs"])
             tasks.append(
                 TaskSpec(
                     task_id=task_id,
