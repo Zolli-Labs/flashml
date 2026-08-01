@@ -17,8 +17,24 @@ This plan implements §5.4 of `flashml-cloud/docs/superpowers/specs/2026-07-31-d
 - **Determinism is the contract.** Per `sgd_trainer.py`: "resuming from step k reproduces the uninterrupted run bit-for-bit — recovery must never silently change the result." Seed every RNG from `spec["params"]["seed"]`.
 - **`metrics.json` is the commit artifact.** Per the 2026-07-29 fix, only a root-level `metrics.json` sets the commit hash; the executor uploads `/work/out/` recursively. The delta goes to `/work/out/delta.json`, and `metrics.json` references it.
 - **New task modules must be added to `ALLOWED_TASK_MODULES`** (`flashruntime/service/modea.py:51`) or expansion fails closed.
-- **Existing suites must stay green:** flashruntime 323 passed, 1 skipped, 20 deselected.
-- Run tests with the repo venv: `cd flashruntime && .venv/bin/pytest`.
+- **Existing suites must stay green.** Measured baseline on this machine
+  (2026-07-31, before this plan): **319 passed** on the fast subset.
+- **Run tests with the venv on `PATH`, not just the venv's pytest:**
+
+      cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest
+
+  Invoking `.venv/bin/pytest` alone makes
+  `test_examples_e2e.py::test_sklearn_sweep_end_to_end` fail with
+  `LaunchError: failed to start 'python'` — `LocalLauncher` spawns
+  `argv[0] = "python"`, which is not resolvable unless the venv is on `PATH`.
+  The same cause skips three torchrun tests. That failure is environmental;
+  do not chase it.
+- **Inner loop** (the full suite's torchrun DDP tests take many minutes):
+
+      PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest -q \
+        --ignore=tests/test_examples_e2e.py --ignore=tests/test_gpu_e2e.py
+
+  → 319 passed in ~10 s at baseline. Run the full suite once, at Task 6.
 - Never run the coordinator with more than one uvicorn worker (`HANDOFF.md` risk #5).
 
 ## File Structure
@@ -119,6 +135,45 @@ def test_reduce_deltas_rejects_mismatched_shapes():
 def test_reduce_deltas_rejects_mismatched_param_names():
     with pytest.raises(WeightShapeMismatch):
         reduce_deltas([(_blob(w=[1.0]), 1), (_blob(bias=[1.0]), 1)])
+
+
+# --- data length must match the declared shape -------------------------------
+# A blob's "shape" is a CLAIM about its "data". Checking only that two blobs
+# agree on the claim lets zip() silently truncate and reduce_deltas emit
+# garbage — "loads fine, trains to nonsense". Added after the Task 1 review
+# found this reachable; do not delete these.
+
+def _lying(n_declared: int, data: list[float]) -> dict:
+    return {"w": {"shape": [n_declared], "data": list(data)}}
+
+
+def test_subtract_rejects_data_length_disagreeing_with_shape():
+    with pytest.raises(WeightShapeMismatch, match="carries"):
+        subtract(_lying(2, [1.0, 2.0, 3.0]), _blob(w=[5.0, 6.0]))
+
+
+def test_apply_delta_rejects_data_length_disagreeing_with_shape():
+    with pytest.raises(WeightShapeMismatch, match="carries"):
+        apply_delta(_blob(w=[1.0, 1.0]), _lying(2, [1.0]))
+
+
+def test_reduce_deltas_rejects_short_contribution():
+    # Previously returned [5.0, 5.0, 0.5] — silently wrong, no error raised.
+    with pytest.raises(WeightShapeMismatch, match="carries"):
+        reduce_deltas([(_blob(w=[1.0, 1.0, 1.0]), 1), (_lying(3, [9.0, 9.0]), 1)])
+
+
+def test_reduce_deltas_validates_the_first_contribution_too():
+    # reduce_deltas compares contributions[1:] against the first, so the
+    # first blob is never the `b` argument and needs its own check.
+    with pytest.raises(WeightShapeMismatch, match="carries"):
+        reduce_deltas([(_lying(3, [9.0, 9.0]), 1), (_blob(w=[1.0, 1.0, 1.0]), 1)])
+
+
+def test_scalar_parameter_with_empty_shape_is_accepted():
+    """Guard against over-strict validation: shape [] means one element."""
+    scalar = {"s": {"shape": [], "data": [4.0]}}
+    assert reduce_deltas([(scalar, 1)]) == scalar
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -145,6 +200,8 @@ container.
 """
 
 from __future__ import annotations
+
+import math
 
 __all__ = [
     "WeightShapeMismatch",
@@ -173,7 +230,26 @@ def decode(blob: dict) -> dict[str, tuple[list[int], list[float]]]:
     return {name: (list(p["shape"]), list(p["data"])) for name, p in blob.items()}
 
 
+def _require_well_formed(blob: dict) -> None:
+    """Every parameter's data length must match its declared shape.
+
+    Without this, `zip()` in subtract/apply_delta silently truncates to the
+    shorter list and reduce_deltas emits garbage — the exact "loads fine,
+    trains to nonsense" failure this module exists to prevent. Checking the
+    shape FIELD alone is not enough; the field is a claim about the data.
+    """
+    for name, p in blob.items():
+        expected = math.prod(p["shape"])      # math.prod([]) == 1, i.e. a scalar
+        if len(p["data"]) != expected:
+            raise WeightShapeMismatch(
+                f"parameter {name!r} declares shape {p['shape']} "
+                f"({expected} elements) but carries {len(p['data'])}"
+            )
+
+
 def _require_same_params(a: dict, b: dict) -> None:
+    _require_well_formed(a)
+    _require_well_formed(b)
     if a.keys() != b.keys():
         raise WeightShapeMismatch(
             f"parameter names differ: {sorted(a.keys())} vs {sorted(b.keys())}"
@@ -222,6 +298,7 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
         raise ValueError("reduce_deltas: zero total samples")
 
     first = contributions[0][0]
+    _require_well_formed(first)          # contributions[0] is never the `b` arg below
     for blob, _ in contributions[1:]:
         _require_same_params(first, blob)
 
@@ -239,7 +316,7 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_weights.py -v`
-Expected: 8 passed
+Expected: 14 passed
 
 - [ ] **Step 5: Commit**
 
@@ -561,7 +638,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_worker.py -v`
-Expected: 8 passed
+Expected: 14 passed
 
 - [ ] **Step 5: Commit**
 
