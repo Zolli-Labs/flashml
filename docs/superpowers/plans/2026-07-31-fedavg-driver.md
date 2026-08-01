@@ -872,7 +872,7 @@ import json
 
 import pytest
 
-from flashml_workloads.fedavg_driver import QuorumNotMet, run_fedavg
+from flashml_workloads.fedavg_driver import ArtifactNotFound, QuorumNotMet, run_fedavg
 
 
 class FakeCoordinator:
@@ -908,9 +908,20 @@ class FakeCoordinator:
         return out
 
     def get_artifact(self, key):
-        r = int(key.split("/")[1].split("r")[1])
-        shard = int(key.split("/")[2].split("-")[1])
-        value, samples = next((v, n) for s, v, n in self.commits[r] if s == shard)
+        # Anything previously PUT wins. Without this the fake would
+        # re-derive a *delta* for a weights key and a resume test could pass
+        # against entirely the wrong data path.
+        if key in self.uploaded:
+            return self.uploaded[key]
+        parts = key.split("/")
+        if len(parts) < 3 or not parts[2].startswith("shard-"):
+            raise ArtifactNotFound(key)
+        r = int(parts[1].split("r")[1])
+        shard = int(parts[2].split("-")[1])
+        match = [(v, n) for s, v, n in self.commits.get(r, []) if s == shard]
+        if not match:
+            raise ArtifactNotFound(key)
+        value, samples = match[0]
         if key.endswith("metrics.json"):
             return {"round": r, "shard": shard, "samples": samples,
                     "loss": 1.0 / (r + 1), "local_steps": 5,
@@ -1021,11 +1032,21 @@ from typing import Any, Callable, Protocol, TypedDict
 
 from flashml_workloads.fedavg_weights import apply_delta, reduce_deltas
 
-__all__ = ["Coordinator", "QuorumNotMet", "RoundResult", "run_fedavg"]
+__all__ = ["ArtifactNotFound", "Coordinator", "QuorumNotMet", "RoundResult",
+           "run_fedavg"]
 
 
 class QuorumNotMet(RuntimeError):
     """A round's deadline passed with too few committed shards."""
+
+
+class ArtifactNotFound(LookupError):
+    """No artifact exists at that key.
+
+    A named exception, not a bare `Exception` catch: `resume_state` must
+    distinguish "this round never completed" (expected, keep looking) from
+    "the coordinator is unreachable" (fatal, must not look like round 0).
+    """
 
 
 class RoundResult(TypedDict):
@@ -1208,14 +1229,46 @@ def test_http_coordinator_sends_auth_headers(monkeypatch):
 
 
 def test_resume_state_finds_last_completed_round():
+    # 42.0 is deliberately unlike any delta value in `commits` — if the fake
+    # ever re-derives a delta for this key instead of returning what was PUT,
+    # this assertion must fail rather than coincide.
     fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
     fake.uploaded["jobs/job-r0/round-000/weights.json"] = {
-        "w": {"shape": [1], "data": [1.0]}
+        "w": {"shape": [1], "data": [42.0]}
     }
     next_round, weights, uri = resume_state(fake, ["job-r0"])
     assert next_round == 1
-    assert weights["w"]["data"] == [1.0]
+    assert weights["w"]["data"] == [42.0]
     assert uri == "artifact://jobs/job-r0/round-000/weights.json"
+
+
+def test_resume_state_picks_the_newest_round_not_the_first():
+    fake = FakeCoordinator({})
+    fake.uploaded["jobs/job-r0/round-000/weights.json"] = {"w": {"shape": [1], "data": [1.0]}}
+    fake.uploaded["jobs/job-r1/round-001/weights.json"] = {"w": {"shape": [1], "data": [2.0]}}
+    next_round, weights, _ = resume_state(fake, ["job-r0", "job-r1"])
+    assert next_round == 2
+    assert weights["w"]["data"] == [2.0]
+
+
+def test_resume_state_skips_a_round_that_never_aggregated():
+    # Round 1 was submitted but crashed before writing weights: resume at 1.
+    fake = FakeCoordinator({})
+    fake.uploaded["jobs/job-r0/round-000/weights.json"] = {"w": {"shape": [1], "data": [7.0]}}
+    next_round, weights, _ = resume_state(fake, ["job-r0", "job-r1"])
+    assert next_round == 1
+    assert weights["w"]["data"] == [7.0]
+
+
+def test_resume_state_propagates_transport_errors():
+    """An unreachable coordinator must NOT look like 'no rounds completed' —
+    that would silently restart a finished run from scratch."""
+    class Unreachable(FakeCoordinator):
+        def get_artifact(self, key):
+            raise ConnectionError("coordinator unreachable")
+
+    with pytest.raises(ConnectionError):
+        resume_state(Unreachable({}), ["job-r0"])
 
 
 def test_resume_state_on_empty_history_starts_at_zero():
@@ -1245,6 +1298,7 @@ Add to `flashml_workloads/fedavg_driver.py`:
 
 ```python
 import json
+import urllib.error
 import urllib.request
 
 
@@ -1284,8 +1338,13 @@ class HttpCoordinator:
                              headers=self.headers)
 
     def get_artifact(self, key: str):
-        return self._request("GET", f"{self.base_url}/v1alpha1/artifacts/{key}",
-                             headers=self.headers)
+        try:
+            return self._request("GET", f"{self.base_url}/v1alpha1/artifacts/{key}",
+                                 headers=self.headers)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise ArtifactNotFound(key) from None
+            raise   # 5xx / auth failures are NOT "round never completed"
 
     def put_artifact(self, key: str, body) -> None:
         self._request("PUT", f"{self.base_url}/v1alpha1/artifacts/{key}",
@@ -1295,21 +1354,24 @@ class HttpCoordinator:
 def resume_state(coord: Coordinator, job_ids: list[str]) -> tuple[int, dict, str | None]:
     """Where to restart after a driver crash.
 
-    Rounds are idempotent: the weights artifact is written only after a
-    round aggregates, so the newest one that exists names the last round
-    that fully completed.
+    `job_ids[r]` is the job submitted for round r — they are appended in
+    order, so the round index and the list index are the same thing. Rounds
+    are idempotent: the weights artifact is written only AFTER a round
+    aggregates, so the newest one that exists names the last round that
+    fully completed.
+
+    Only ArtifactNotFound is swallowed. A transport error must propagate:
+    silently treating an unreachable coordinator as "no rounds done" would
+    restart a finished run from scratch.
     """
-    for job_id in reversed(job_ids):
-        for a in coord.artifacts(job_id):
-            pass  # artifacts() lists task outputs; weights live at a known key
-        for r in range(len(job_ids) - 1, -1, -1):
-            key = f"jobs/{job_id}/round-{r:03d}/weights.json"
-            try:
-                weights = coord.get_artifact(key)
-            except Exception:
-                continue
-            if weights:
-                return r + 1, weights, f"artifact://{key}"
+    for r in range(len(job_ids) - 1, -1, -1):
+        key = f"jobs/{job_ids[r]}/round-{r:03d}/weights.json"
+        try:
+            weights = coord.get_artifact(key)
+        except ArtifactNotFound:
+            continue
+        if weights:
+            return r + 1, weights, f"artifact://{key}"
     return 0, {}, None
 ```
 
@@ -1330,7 +1392,7 @@ comes from the parameter).
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && .venv/bin/pytest tests/test_fedavg_driver.py -v`
-Expected: 11 passed
+Expected: 15 passed
 
 - [ ] **Step 5: Commit**
 
