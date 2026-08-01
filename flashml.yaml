@@ -1,0 +1,43 @@
+# FlashML job definition. This file is what makes a repo submittable.
+version: 1
+name: federated-mlp
+
+# One of the curated images. `pytorch-cpu` provides torch and numpy on
+# CPU-only PyTorch. Task containers have no network, so anything not in the
+# image and not in this repo does not exist at runtime — which is why the
+# training data is generated rather than downloaded.
+image: pytorch-cpu
+
+entrypoint: train.py
+
+# Passed through to your script. FlashML appends --round, --num-shards and
+# --shard on top of these.
+args: ["--epochs", "8", "--lr", "0.05"]
+
+# `federated` asks the platform to average your model across machines every
+# round. It is a contract, not a flag: train.py has to read
+# /work/inputs/weights.json and write /work/out/delta.json for it to mean
+# anything. Preflight checks that the entrypoint at least mentions them.
+#
+# Without this, `mode` defaults to `independent` — the shards would run once,
+# in parallel, and never exchange anything.
+mode: federated
+
+# How many times to average. Each round is a full pass: every shard trains,
+# uploads, the platform averages, and the result seeds the next round.
+rounds: 5
+
+# The quorum. A round completes once this many machines have reported, so a
+# laptop that closes its lid does not stall everyone else — it simply misses
+# that round and rejoins the next one. Set it BELOW `shards`, or one slow
+# machine gates every round.
+min_participants: 2
+
+# How many pieces to split the data into, and therefore how many machines
+# can work in parallel per round. More shards than online machines is fine;
+# they queue.
+shards: 3
+
+# Per-task wall clock. Generous: a volunteer's first task also pays for the
+# container image pull.
+timeout_seconds: 900
