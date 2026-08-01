@@ -42,7 +42,7 @@ Standing guidance is "do not put the current coordinator on a public IP for long
 | File | Responsibility |
 |---|---|
 | `flashruntime/flashruntime/service/auth.py` (new) | `NodeAuthenticator` protocol, `OpenAuthenticator`, `StaticTokenAuthenticator`, `authenticator_from_env()`. No FastAPI, no lease knowledge — pure token → node_id. |
-| `flashruntime/flashruntime/leases/__init__.py` (modify) | `live_leases_for_node(node_id) -> set[tuple[str, str]]` — the authorization *fact* the service asks for. |
+| `flashruntime/flashruntime/leases/manager.py` (modify) | `live_leases_for_node(node_id) -> set[tuple[str, str]]` — the authorization *fact* the service asks for. |
 | `flashruntime/flashruntime/service/modea.py` (modify) | Resolve the caller, scope `PUT /artifacts`, fail-closed startup guard. |
 | `flashruntime/flashruntime/service/checkpoints.py` (modify) | Same scoping for `parts` and `commit`. |
 | `flashnode/flashnode/identity/credentials.py` (new) | Read/write `~/.flashnode/credentials.json` at 0600. |
@@ -289,34 +289,49 @@ token makes attribution and revocation meaningless."
 ### Task 2: `live_leases_for_node` — the authorization fact
 
 **Files:**
-- Modify: `flashruntime/flashruntime/leases/__init__.py`
+- Modify: `flashruntime/flashruntime/leases/manager.py`
 - Test: `flashruntime/tests/test_leases_scope.py`
 
 **Interfaces:**
 - Consumes: nothing from Task 1.
-- Produces: `LeaseManager.live_leases_for_node(node_id: str) -> set[tuple[str, str]]` — `(job_id, task_id)` for every lease this node currently holds that has **not** expired.
+- Produces: `LeaseManager.live_leases_for_node(node_id: str, now: datetime | None = None) -> set[tuple[str, str]]` — `(job_id, task_id)` for every lease this node currently holds that is still live.
 
 Expiry matters: a node whose lease lapsed must lose write access immediately, or a straggler could overwrite the result of whoever reclaimed its task.
+
+**API facts, verified in the source — do not assume otherwise:**
+- `LeaseManager.__init__(store=None, on_event=None)` takes **no clock**. Time is
+  passed per call as `now: datetime | None` (see `claim`, `heartbeat`, `sweep`).
+  Tests control time by passing `now=`, not by injecting a clock.
+- Tasks are registered with `add_task(spec, now=None)` — there is no
+  `submit_tasks`.
+- `Lease` (`protocol/v1alpha1.py:355`) carries `lease_id, task_id, job_id,
+  node_id, attempt_number, deadline: datetime, payload`. The expiry field is
+  **`deadline`**, and it is a `datetime` — there is no `expires_at`.
+- **`LeaseManager._is_live(record, lease, now)` already exists**
+  (`manager.py:281`) and is the canonical liveness predicate: it checks the
+  lease is still the active one, `deadline > now`, and the record is `LEASED`.
+  **Reuse it.** Duplicating expiry logic is how the two copies drift apart, and
+  the record-state check is one this task would otherwise forget.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # flashruntime/tests/test_leases_scope.py
-"""Which (job, task) pairs may a node write to right now?"""
+"""Which (job, task) pairs may a node write to right now?
+
+Time is controlled by passing `now=` to the manager — LeaseManager takes no
+clock; every time-sensitive method accepts a `now: datetime | None`.
+"""
+
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from flashruntime.leases import LeaseManager
+from flashruntime.leases.manager import LeaseManager
 from flashruntime.leases.store import InMemoryLeaseStore
 from flashruntime.protocol.v1alpha1 import TaskSpec
 
-
-class FakeClock:
-    def __init__(self, t=0.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
+T0 = datetime(2026, 7, 31, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _task(job_id: str, task_id: str) -> TaskSpec:
@@ -329,33 +344,31 @@ def _task(job_id: str, task_id: str) -> TaskSpec:
 
 @pytest.fixture()
 def manager():
-    clock = FakeClock()
-    m = LeaseManager(store=InMemoryLeaseStore(), clock=clock)
-    m._test_clock = clock          # exposed for the tests below
-    return m
+    return LeaseManager(store=InMemoryLeaseStore())
 
 
 def test_no_leases_means_no_scope(manager):
-    assert manager.live_leases_for_node("node-a") == set()
+    assert manager.live_leases_for_node("node-a", now=T0) == set()
 
 
 def test_a_claimed_task_is_in_scope_for_its_holder(manager):
-    manager.submit_tasks([_task("job-1", "task-000")])
-    manager.claim("node-a")
-    assert manager.live_leases_for_node("node-a") == {("job-1", "task-000")}
+    manager.add_task(_task("job-1", "task-000"), now=T0)
+    manager.claim("node-a", now=T0)
+    assert manager.live_leases_for_node("node-a", now=T0) == {("job-1", "task-000")}
 
 
 def test_another_node_gets_no_scope_from_it(manager):
-    manager.submit_tasks([_task("job-1", "task-000")])
-    manager.claim("node-a")
-    assert manager.live_leases_for_node("node-b") == set()
+    manager.add_task(_task("job-1", "task-000"), now=T0)
+    manager.claim("node-a", now=T0)
+    assert manager.live_leases_for_node("node-b", now=T0) == set()
 
 
 def test_multiple_live_leases_all_appear(manager):
-    manager.submit_tasks([_task("job-1", "task-000"), _task("job-2", "task-000")])
-    manager.claim("node-a")
-    manager.claim("node-a")
-    assert manager.live_leases_for_node("node-a") == {
+    manager.add_task(_task("job-1", "task-000"), now=T0)
+    manager.add_task(_task("job-2", "task-000"), now=T0)
+    manager.claim("node-a", now=T0)
+    manager.claim("node-a", now=T0)
+    assert manager.live_leases_for_node("node-a", now=T0) == {
         ("job-1", "task-000"), ("job-2", "task-000"),
     }
 
@@ -363,12 +376,25 @@ def test_multiple_live_leases_all_appear(manager):
 def test_an_expired_lease_leaves_scope(manager):
     """A straggler whose lease lapsed must not be able to overwrite the
     result of whoever reclaimed its task."""
-    manager.submit_tasks([_task("job-1", "task-000")])
-    manager.claim("node-a")
-    assert manager.live_leases_for_node("node-a") == {("job-1", "task-000")}
-    manager._test_clock.t += 31.0
-    assert manager.live_leases_for_node("node-a") == set()
+    manager.add_task(_task("job-1", "task-000"), now=T0)
+    manager.claim("node-a", now=T0)
+    assert manager.live_leases_for_node("node-a", now=T0) == {("job-1", "task-000")}
+    later = T0 + timedelta(seconds=31)
+    assert manager.live_leases_for_node("node-a", now=later) == set()
+
+
+def test_a_completed_task_leaves_scope(manager):
+    """_is_live also requires the record to still be LEASED, so a task whose
+    result was already accepted stops being writable — otherwise a second
+    upload could replace a committed artifact."""
+    manager.add_task(_task("job-1", "task-000"), now=T0)
+    lease = manager.claim("node-a", now=T0)
+    manager.complete(lease.lease_id, output_sha256="0" * 64, now=T0)
+    assert manager.live_leases_for_node("node-a", now=T0) == set()
 ```
+
+If `complete()`'s signature differs, read `manager.py:165` and match it — the
+assertion is what matters, not the call shape.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -379,41 +405,46 @@ If the fixture itself errors, read `tests/test_leases.py` and match how it const
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add to `LeaseManager` in `flashruntime/flashruntime/leases/__init__.py`:
+Add to `LeaseManager` in `flashruntime/flashruntime/leases/manager.py`, in the
+"worker side" section beside `lease_info`:
 
 ```python
-    def live_leases_for_node(self, node_id: str) -> set[tuple[str, str]]:
+    def live_leases_for_node(
+        self, node_id: str, now: datetime | None = None
+    ) -> set[tuple[str, str]]:
         """(job_id, task_id) this node may currently write to.
 
-        Expiry is checked here rather than trusting the sweeper: a lease that
-        lapsed a millisecond ago must already be out of scope, or a straggler
-        could overwrite the result of whoever reclaimed its task. Fails closed
-        on any record whose lease is missing or malformed.
+        Delegates liveness to `_is_live` rather than re-testing `deadline`
+        itself: that predicate also requires the lease to still be the active
+        one and the record to still be LEASED, so a task whose result was
+        already accepted stops being writable. Two copies of this rule would
+        drift, and the drift would be a silent authorization hole.
         """
-        now = self._clock()
+        now = now if now is not None else datetime.now(timezone.utc)
         scope: set[tuple[str, str]] = set()
         for record in self._store.leased():
             lease = record.active_lease
-            if lease is None or getattr(lease, "node_id", None) != node_id:
+            if lease is None or lease.node_id != node_id:
                 continue
-            expires = getattr(lease, "expires_at", None)
-            if expires is None or expires <= now:
+            if not self._is_live(record, lease, now):
                 continue
-            scope.add((record.spec.job_id, record.spec.task_id))
+            scope.add((lease.job_id, lease.task_id))
         return scope
 ```
 
-Read the surrounding class first: the clock attribute may be named `self._clock` or `self.clock`, and `Lease.expires_at` may be a float or a datetime. Match what is actually there — if `expires_at` is a datetime, compare against a datetime, not a float.
+`datetime` and `timezone` are already imported at `manager.py:29`. If the module
+has a shared `utcnow()` helper, prefer it over `datetime.now(timezone.utc)` for
+consistency — check `protocol/v1alpha1.py`, which defines one.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_leases_scope.py tests/test_leases.py tests/test_leases_sqlite.py -v`
-Expected: 5 new passed; the two existing lease suites unchanged and green.
+Expected: 6 new passed; the two existing lease suites unchanged and green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add flashruntime/leases/__init__.py tests/test_leases_scope.py
+git add flashruntime/leases/manager.py tests/test_leases_scope.py
 git commit -m "feat(leases): live_leases_for_node, the write-authorization fact
 
 Checks expiry inline rather than trusting the sweeper — a lease that lapsed
