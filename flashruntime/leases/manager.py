@@ -260,6 +260,28 @@ class LeaseManager:
             return None
         return lease
 
+    def live_leases_for_node(
+        self, node_id: str, now: datetime | None = None
+    ) -> set[tuple[str, str]]:
+        """(job_id, task_id) this node may currently write to.
+
+        Delegates liveness to `_is_live` rather than re-testing `deadline`
+        itself: that predicate also requires the lease to still be the active
+        one and the record to still be LEASED, so a task whose result was
+        already accepted stops being writable. Two copies of this rule would
+        drift, and the drift would be a silent authorization hole.
+        """
+        now = now if now is not None else _utcnow()
+        scope: set[tuple[str, str]] = set()
+        for record in self._store.leased():
+            lease = record.active_lease
+            if lease is None or lease.node_id != node_id:
+                continue
+            if not self._is_live(record, lease, now):
+                continue
+            scope.add((lease.job_id, lease.task_id))
+        return scope
+
     # -- internals ----------------------------------------------------------
 
     def _release(self, record: TaskRecord, now: datetime, requeue_event: EventType) -> None:
