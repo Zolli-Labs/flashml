@@ -29,7 +29,7 @@ import argparse
 import json
 from pathlib import Path
 
-from flashml_workloads.fedavg_weights import decode, encode, subtract
+from flashml_workloads.fedavg_weights import decode, encode, require_finite, subtract
 
 
 def build_model(seed: int, in_dim: int, hidden: int, out_dim: int):
@@ -54,6 +54,13 @@ def blob_to_state(model, blob: dict) -> None:
     import torch
 
     from flashml_workloads.fedavg_weights import WeightShapeMismatch
+
+    # This is the worker's entry point for weights that arrived over the
+    # network as a staged input file — the last line of defence on the node
+    # side before a NaN/Inf is loaded straight into the torch model. Gate it
+    # before anything else so a corrupted or attacker-written weights.json
+    # never reaches `load_state_dict`.
+    require_finite(blob, "blob_to_state")
 
     current = state_to_blob(model)
     if current.keys() != blob.keys():

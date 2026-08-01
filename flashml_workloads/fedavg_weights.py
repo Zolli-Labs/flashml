@@ -164,6 +164,35 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
     # counts outright. (Ordered AFTER the total guard so an all-zero
     # contribution set still reports the clearer "zero total samples".)
     for i, (_, n) in enumerate(contributions):
+        # A NaN/Inf sample count slips BOTH the total guard above and the
+        # `n <= 0` guard below, because every comparison against NaN is
+        # False: `total <= 0`, `total == 0` and `n <= 0` are all False for a
+        # NaN contribution. It happens to be caught downstream by the
+        # finiteness check on the reduced result, but only by accident, not
+        # by design, so it is rejected explicitly here, by index, before it
+        # can reach that accidental safety net.
+        if isinstance(n, float) and not math.isfinite(n):
+            raise ValueError(
+                f"reduce_deltas: contribution {i} has a non-finite sample "
+                f"count {n!r}; sample counts must be a finite positive "
+                "integer"
+            )
+        # `bool` is a subclass of `int` (`True == 1`, `False == 0`), so a
+        # bool sample count would otherwise slide through silently. A
+        # sample count is a count of training examples, not a flag, and
+        # this boundary receives untrusted JSON from a volunteer node where
+        # `true`/`false` is a plausible malformed value for a field that
+        # should be an integer — reject it rather than coerce it. Likewise
+        # a non-integer float (e.g. `2.5`) does not correspond to any real
+        # shard size; it happens not to break the convex-combination math
+        # below, but silently accepting it is the same kind of
+        # accidental-safety gap the NaN/Inf case above is about.
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise ValueError(
+                f"reduce_deltas: contribution {i} has a non-integer sample "
+                f"count {n!r} (type {type(n).__name__}); sample counts must "
+                "be a plain positive int, not a bool or a fractional float"
+            )
         if n <= 0:
             raise ValueError(
                 f"reduce_deltas: contribution {i} has non-positive sample "

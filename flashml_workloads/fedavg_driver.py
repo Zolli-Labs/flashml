@@ -27,7 +27,11 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Protocol, Sequence, TypedDict
 
-from flashml_workloads.fedavg_weights import apply_delta, reduce_deltas
+from flashml_workloads.fedavg_weights import (
+    apply_delta,
+    reduce_deltas,
+    require_finite,
+)
 
 _SAFE_DELTA_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -312,6 +316,12 @@ def resume_state(coord: Coordinator,
                 "cannot distinguish a corrupt commit from a round that "
                 "never completed"
             )
+        # This is the READ path: the weights artifact was written by a PUT
+        # that is currently unauthenticated, so a corrupted or
+        # attacker-written weights.json must not be handed back to the
+        # caller un-gated. Without this, a NaN here resumes training from
+        # NaN and the run still reports success.
+        require_finite(weights, f"resume_state: weights artifact {key!r}")
         return r + 1, weights, f"artifact://{key}"
 
     if pairs and min(r for r, _ in pairs) > 0:

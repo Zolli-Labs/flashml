@@ -685,6 +685,25 @@ def test_resume_state_refuses_to_guess_when_the_history_is_incomplete():
         resume_state(fake, [(5, "job-r5"), (6, "job-r6")])
 
 
+# -- C4 (read path): a resumed weights artifact is not gated on finiteness --
+
+
+def test_resume_state_rejects_a_non_finite_weights_artifact():
+    """resume_state is the READ path: a weights.json written by an
+    unauthenticated artifact PUT (or corrupted some other way) must not be
+    handed back to the caller with a NaN silently inside it. Without a gate
+    here, `run_fedavg(..., weights_uri=uri, initial_weights=weights)` would
+    resume training from NaN and still report success."""
+    from flashml_workloads.fedavg_weights import NonFiniteWeights
+
+    fake = FakeCoordinator({})
+    fake.uploaded["jobs/job-r0/round-000/weights.json"] = {
+        "w": {"shape": [1], "data": [float("nan")]}
+    }
+    with pytest.raises(NonFiniteWeights):
+        resume_state(fake, [(0, "job-r0")])
+
+
 def test_run_fedavg_resumes_from_start_round():
     fake = FakeCoordinator({1: [(0, 1.0, 10), (1, 1.0, 10)]})
     result = run_fedavg(fake, rounds=2, num_shards=2, min_participants=2,

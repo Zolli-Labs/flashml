@@ -179,6 +179,44 @@ def test_subtract_rejects_a_non_finite_result():
         subtract(_blob(w=[float("nan")]), _blob(w=[1.0]))
 
 
+# -- C5: a NaN sample count slips both the total and per-contribution ------
+# -- guards by accident, because every comparison with NaN is False --------
+
+
+def test_reduce_deltas_rejects_a_nan_sample_count_explicitly():
+    """`n = float('nan')` fails neither `total <= 0` (nan compares False
+    against everything) nor the old `n <= 0` per-contribution guard, for the
+    same reason. It happened to be caught downstream by `require_finite` on
+    the reduced result, but only by accident — the per-contribution guard
+    must name it explicitly, by index, rather than relying on that."""
+    with pytest.raises(ValueError, match=r"contribution 1.*non-finite sample count"):
+        reduce_deltas([(_blob(w=[1.0]), 10), (_blob(w=[1.0]), float("nan"))])
+
+
+def test_reduce_deltas_rejects_an_infinite_sample_count_explicitly():
+    with pytest.raises(ValueError, match=r"contribution 0.*non-finite sample count"):
+        reduce_deltas([(_blob(w=[1.0]), float("inf")), (_blob(w=[1.0]), 10)])
+
+
+def test_reduce_deltas_rejects_a_bool_sample_count():
+    """`True == 1` and `False == 0` in Python, so a bool sample count would
+    silently behave as a real count. Decision: reject it anyway — a sample
+    count is a count of training examples, not a flag, and this boundary
+    receives untrusted JSON where `true`/`false` is a plausible malformed
+    payload for a field that should be an integer."""
+    with pytest.raises(ValueError, match=r"contribution 1.*non-integer sample count"):
+        reduce_deltas([(_blob(w=[1.0]), 10), (_blob(w=[1.0]), True)])
+
+
+def test_reduce_deltas_rejects_a_non_integer_float_sample_count():
+    """A fractional sample count (2.5 "examples") does not correspond to any
+    real shard size. It happens not to break the convex-combination math
+    (still positive, still sums correctly), but silently accepting it is the
+    same kind of accidental-safety gap C3/C5 are about: reject it by design."""
+    with pytest.raises(ValueError, match=r"contribution 1.*non-integer sample count"):
+        reduce_deltas([(_blob(w=[1.0]), 10), (_blob(w=[1.0]), 2.5)])
+
+
 def test_scalar_parameter_with_empty_shape():
     """A parameter with shape [] (scalar) should have exactly 1 data element."""
     # Scalar: shape [] has product 1

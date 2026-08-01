@@ -140,6 +140,23 @@ def test_batches_wrap_and_stay_full_size(tmp_path):
     assert sizes == [12, 12, 12, 12], f"short batch produced: {sizes}"
 
 
+def test_blob_to_state_rejects_a_non_finite_incoming_blob(tmp_path):
+    """blob_to_state is the worker's entry point for weights that arrived
+    over the network as a staged input file: the last line of defence on
+    the node side before a NaN is loaded straight into the torch model.
+    Without a gate here, a corrupted or attacker-written weights.json loads
+    silently and every subsequent local step trains from NaN."""
+    from flashml_workloads.fedavg_weights import NonFiniteWeights
+
+    model = fedavg_worker.build_model(seed=0, in_dim=4, hidden=8, out_dim=2)
+    blob = fedavg_worker.state_to_blob(model)
+    name = next(iter(blob))
+    blob[name]["data"][0] = float("nan")
+
+    with pytest.raises(NonFiniteWeights):
+        fedavg_worker.blob_to_state(model, blob)
+
+
 def test_empty_shard_raises_clear_error(tmp_path):
     """num_shards > dataset_size leaves some shards with zero rows; this
     must fail loudly with a clear message, not a bare ZeroDivisionError."""
