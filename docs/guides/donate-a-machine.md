@@ -40,6 +40,41 @@ volunteer node either.
 
 ---
 
+## Platform support
+
+| Platform | Status | Prerequisite | `FLASHNODE_WORKDIR` |
+|---|---|---|---|
+| Linux | Proven | Docker or Podman | Any local path; defaults to the system temp dir. |
+| macOS | Proven | Docker Desktop, or Colima | Must be under `$HOME` — the VM only shares `$HOME` by default (colima), so a workdir outside it silently bind-mounts as an **empty** directory rather than failing loudly. |
+| Windows | **Constructed-argv-verified, not execution-verified** (see below) | Docker Desktop with the **WSL2 backend** | Must be under a directory Docker Desktop shares (by default your user profile, e.g. `C:\Users\<you>\...`) — a workdir outside Docker Desktop's shared drives has the same silent-empty-mount failure mode as the macOS/colima case above, and has already cost real debugging time once. |
+
+`flashnode work` used to crash immediately on Windows: `os.getuid`/
+`os.getgid`, which the agent needs to build the container's `--user` flag,
+do not exist there. As of this change:
+
+- On Windows, `--user` is **omitted** rather than crashing. This is safe
+  only because the curated images this pool runs (`python-slim`, `sklearn`,
+  `pytorch-cpu`) each declare a fixed non-root `USER` in their Dockerfile —
+  see `flashml-cloud/images/README.md`. If you point `FLASHNODE_ALLOWED_IMAGES`
+  at some other image on a Windows host, and that image runs as root by
+  default, your container runs the task **as root inside the container**.
+  Use only images you've confirmed declare a non-root `USER`.
+- Your workdir's bind-mount source (`-v <workdir>:/work`) is rewritten from
+  Windows's `C:\Users\...` form into the form Docker Desktop's Windows CLI
+  accepts. You should not need to do anything for this — it's automatic.
+
+**What "constructed-argv-verified, not execution-verified" means:** every
+test covering the Windows code path runs on macOS/Linux with the platform
+faked (`sys.platform` monkeypatched, a synthetic `PureWindowsPath` in
+place of a real one). That proves the `docker run` argv flashnode
+*constructs* is correct — it does not prove Docker Desktop on a real
+Windows machine accepts that argv, or that a task actually completes
+there. Windows becomes **execution-verified** only once someone runs
+`flashnode work` on an actual Windows machine and completes a real task —
+that acceptance run belongs to a later deploy plan, not this change.
+
+---
+
 ## Quickstart
 
 ```bash
@@ -148,7 +183,7 @@ same `docker run` flags — there is no per-task relaxation:
 | `--network none` | The container cannot reach your LAN or the internet. |
 | `--read-only` | The container's root filesystem cannot be modified. |
 | `--tmpfs /tmp:rw,noexec,nosuid,size=256m` | `/tmp` is writable but capped and non-executable — no drop-and-run. |
-| `--user <uid>:<gid>` | The process runs as a non-root, unprivileged user inside the container. |
+| `--user <uid>:<gid>` | The process runs as a non-root, unprivileged user inside the container. **Windows only:** this flag is omitted (`os.getuid`/`os.getgid` don't exist there); non-root execution instead relies entirely on the curated image's own `USER` — see [Platform support](#platform-support). |
 | `--cap-drop=ALL` | No Linux capabilities at all — no raw sockets, no admin operations. |
 | `--security-opt=no-new-privileges` | setuid binaries inside the image cannot escalate. |
 | `--pids-limit=512` | Caps process/thread count — contains fork bombs. |
@@ -239,6 +274,16 @@ the system, and you should weigh them before joining.
    daemon enforces them as expected. Run the integration suite yourself
    (`pytest -m integration`, real Docker required) before trusting this on
    hardware you care about.
+9. **Windows support is constructed-argv-verified, not execution-verified.**
+   See [Platform support](#platform-support) above. The `--user` omission
+   and the bind-mount path rewrite are covered by tests that fake
+   `sys.platform`/`os.getuid` and use a synthetic `PureWindowsPath` — none
+   of it has run against a real Docker Desktop instance on real Windows
+   yet. Non-root execution on Windows also depends on the curated images'
+   `USER` declaration staying correct (see item above on `--user` in
+   [Isolation, precisely](#isolation-precisely)) — that dependency doesn't
+   exist on Linux/macOS, where `--user` is passed explicitly regardless of
+   what the image declares.
 
 ---
 
