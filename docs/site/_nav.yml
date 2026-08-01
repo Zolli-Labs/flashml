@@ -16,6 +16,7 @@ Guides:
   - guides/sklearn.md
   - guides/huggingface.md
   - guides/jobspec-and-isolation.md
+  - guides/federated-averaging.md
 Concepts:
   - concepts/architecture.md
 Reference:
