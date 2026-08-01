@@ -1546,110 +1546,373 @@ weights are written only after aggregation."
 ### Task 6: Local two-agent convergence demo
 
 **Files:**
+- Create: `tests/test_fedavg_convergence.py`
 - Create: `scripts/fedavg_local_demo.py`
-- Test: `tests/integration/test_fedavg_e2e.py`
-- Modify: `docs/site/guides/` — add `federated-averaging.md`; register it if `scripts/build_docs.py --check` requires an index entry
+- Create: `docs/site/guides/federated-averaging.md` (register it if `scripts/build_docs.py --check` requires an index entry)
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `scripts/fedavg_local_demo.py` — starts a coordinator, launches 2 subprocess-tier agents, runs 5 rounds, prints per-round participants and loss, asserts loss decreased.
+- Produces: `run_round_worker(base_url, node_id)` — a minimal in-test agent that claims one lease, executes it, uploads, and commits. Returns `True` if it did work, `False` if the queue was empty.
 
 This is the task that proves the premise. Everything before it is unit-tested arithmetic.
+
+> **Repo-boundary correction (why this is not `tests/integration/` with real
+> `flashnode work` agents).** `flashruntime/CLAUDE.md` hard rule #1: "this repo
+> imports NOTHING from `flashnode` or `flashml-cloud`. Ever." The workspace
+> `e2e/` suite is where cross-repo proofs live — `e2e/test_local_loop.py`
+> imports `flashnode.executor` precisely because it sits outside both repos.
+> An integration test inside flashruntime that spawned `flashnode work` would
+> make flashruntime's suite unrunnable without flashnode installed.
+>
+> So this task proves convergence **inside flashruntime** using a small
+> in-test agent that speaks the coordinator's HTTP API directly — no flashnode
+> import, no Docker. Task 6b then proves the same loop with genuine
+> `ExecutorLoop` agents in the workspace `e2e/` suite, which is allowed to
+> import both.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
-# tests/integration/test_fedavg_e2e.py
-"""Federated averaging across two real agent processes.
+# tests/test_fedavg_convergence.py
+"""Federated averaging against a REAL coordinator over real HTTP.
 
-Marked integration because it spawns a coordinator and two agents over real
-sockets. The point is convergence across process boundaries — the unit
-tests already pin the arithmetic.
+The unit tests pin the arithmetic against a fake; this pins the whole loop:
+real job expansion, real leases, real artifact storage, real commit-time
+sha256 validation. The "agent" here is a few lines of urllib rather than
+flashnode — flashruntime must not depend on flashnode (CLAUDE.md rule #1),
+and the point being proven is the ROUND loop, not the sandbox.
 """
-import pytest
 
-pytestmark = pytest.mark.integration
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
 
 torch = pytest.importorskip("torch")
 
+from flashml_workloads import fedavg_worker
+from flashml_workloads.fedavg_driver import HttpCoordinator, run_fedavg
 
-def test_five_rounds_reduce_loss_across_two_agents(fedavg_cluster):
-    """fedavg_cluster fixture: coordinator + 2 agents, torn down after."""
-    result = fedavg_cluster.run(rounds=5, num_shards=2, min_participants=2)
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture()
+def coordinator(tmp_path: Path):
+    """A real coordinator subprocess — same shape as e2e/conftest.py."""
+    port = _free_port()
+    env = {
+        **os.environ,
+        "FLASHML_ENABLE_KUBERAY": "0",
+        "FLASHML_SERVICE_AUTOINIT": "1",
+        "FLASHML_LEDGER_PATH": str(tmp_path / "ledger.db"),
+        "FLASHML_LOCAL_ARTIFACTS_DIR": str(tmp_path / "artifacts"),
+    }
+    proc = subprocess.Popen(
+        # `-u` because uvicorn buffers through a pipe and the process then
+        # looks hung (HANDOFF.md §3). cwd is the repo root, never the
+        # workspace root — from there `flashruntime/` resolves as a namespace
+        # package and imports fail strangely.
+        [sys.executable, "-u", "-m", "uvicorn", "flashruntime.service.app:app",
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
+        env=env, cwd=str(Path(__file__).parent.parent),
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                with urllib.request.urlopen(f"{base}/healthz", timeout=1):
+                    break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("coordinator did not become healthy in 20s")
+                time.sleep(0.2)
+        yield base
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _req(method: str, url: str, body=None, raw: bytes | None = None):
+    data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type",
+                       "application/octet-stream" if raw is not None else "application/json")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        payload = r.read()
+        return r.status, (json.loads(payload) if payload else None)
+
+
+def register_node(base_url: str, node_id: str) -> None:
+    _req("POST", f"{base_url}/v1alpha1/nodes/register", {
+        "schema_version": "v1alpha1",
+        "node_id": node_id,
+        "kubernetes_node": node_id,
+        "hostname": node_id,
+        "capabilities": {"cpu_cores": 2, "memory_bytes": 2 * 1024**3,
+                         "gpus": [], "os": "linux", "architecture": "x86_64"},
+        "sandbox_capable": False,
+        "module_capable": True,
+    })
+
+
+def run_round_worker(base_url: str, node_id: str, workdir: Path) -> bool:
+    """Claim one task, execute it, upload, commit. False if nothing to claim."""
+    status, lease = _req("POST", f"{base_url}/v1alpha1/leases/claim",
+                         {"node_id": node_id})
+    if status == 204 or not lease:
+        return False
+
+    payload = lease["payload"]
+    spec = {"params": payload["params"], "inputs": {}}
+
+    for name, uri in (payload.get("inputs") or {}).items():
+        key = uri.removeprefix("artifact://")
+        _, blob = _req("GET", f"{base_url}/v1alpha1/artifacts/{key}")
+        local = workdir / f"{name}.json"
+        local.write_text(json.dumps(blob))
+        spec["inputs"][name] = str(local)
+
+    outdir = workdir / payload["task_id"]
+    outdir.mkdir(parents=True, exist_ok=True)
+    fedavg_worker.run_worker(spec, outdir)
+
+    commit_sha = ""
+    for f in sorted(outdir.iterdir()):
+        raw = f.read_bytes()
+        _req("PUT", f"{base_url}/v1alpha1/artifacts/{payload['output_prefix']}{f.name}",
+             raw=raw)
+        if f.name == "metrics.json":
+            commit_sha = hashlib.sha256(raw).hexdigest()
+
+    _req("POST", f"{base_url}/v1alpha1/attempts/{lease['lease_id']}/complete",
+         {"output_sha256": commit_sha})
+    return True
+
+
+def drain(base_url: str, node_ids: list[str], workdir: Path, budget: int = 40) -> None:
+    """Round-robin the nodes until the queue is empty."""
+    for _ in range(budget):
+        if not any(run_round_worker(base_url, n, workdir) for n in node_ids):
+            return
+
+
+WORKER_PARAMS = {"local_steps": 20, "lr": 0.1, "batch_size": 16, "seed": 0,
+                 "in_dim": 8, "hidden": 16, "out_dim": 2, "dataset_size": 256}
+
+
+def _initial_weights():
+    model = fedavg_worker.build_model(
+        WORKER_PARAMS["seed"], WORKER_PARAMS["in_dim"],
+        WORKER_PARAMS["hidden"], WORKER_PARAMS["out_dim"])
+    return fedavg_worker.state_to_blob(model)
+
+
+def test_rounds_reduce_loss_across_two_nodes(coordinator, tmp_path):
+    """The premise: two independent workers jointly improve one model."""
+    import threading
+
+    nodes = ["node-a", "node-b"]
+    for n in nodes:
+        register_node(coordinator, n)
+
+    stop = threading.Event()
+
+    def agent_loop():
+        while not stop.is_set():
+            if not run_round_worker(coordinator, "node-a", tmp_path / "a"):
+                if not run_round_worker(coordinator, "node-b", tmp_path / "b"):
+                    time.sleep(0.1)
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    t = threading.Thread(target=agent_loop, daemon=True)
+    t.start()
+    try:
+        result = run_fedavg(
+            HttpCoordinator(coordinator), rounds=4, num_shards=2,
+            min_participants=2, worker_params=WORKER_PARAMS,
+            initial_weights=_initial_weights(),
+            round_timeout_s=120.0, poll_seconds=0.25,
+        )
+    finally:
+        stop.set()
+        t.join(timeout=10)
 
     losses = [h["mean_loss"] for h in result["history"]]
-    assert len(losses) == 5
-    assert losses[-1] < losses[0], f"loss did not decrease: {losses}"
+    assert len(losses) == 4
     assert all(h["participants"] == 2 for h in result["history"])
+    assert losses[-1] < losses[0], f"loss did not decrease: {losses}"
 
 
-def test_round_completes_on_quorum_when_one_agent_dies(fedavg_cluster):
-    """The volunteer-network case: a machine leaves mid-run."""
-    result = fedavg_cluster.run(rounds=3, num_shards=2, min_participants=1,
-                                kill_agent_after_round=1)
+def test_round_completes_on_quorum_when_a_node_never_reports(coordinator, tmp_path):
+    """The volunteer case: 3 shards dispatched, only 2 machines ever answer.
+    The round must aggregate rather than stall until the deadline."""
+    nodes = ["node-a", "node-b"]
+    for n in nodes:
+        register_node(coordinator, n)
+    (tmp_path / "w").mkdir()
 
-    assert len(result["history"]) == 3
-    assert result["history"][-1]["participants"] == 1
+    import threading
+
+    stop = threading.Event()
+
+    def agent_loop():
+        while not stop.is_set():
+            if not drain_once(coordinator, nodes, tmp_path / "w"):
+                time.sleep(0.1)
+
+    def drain_once(base, ns, wd) -> bool:
+        return any(run_round_worker(base, n, wd) for n in ns)
+
+    t = threading.Thread(target=agent_loop, daemon=True)
+    t.start()
+    try:
+        result = run_fedavg(
+            HttpCoordinator(coordinator), rounds=1, num_shards=3,
+            min_participants=2, worker_params=WORKER_PARAMS,
+            initial_weights=_initial_weights(),
+            round_timeout_s=120.0, poll_seconds=0.25,
+        )
+    finally:
+        stop.set()
+        t.join(timeout=10)
+
+    assert result["history"][0]["participants"] >= 2
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/integration/test_fedavg_e2e.py -m integration -v`
-Expected: FAIL — `fixture 'fedavg_cluster' not found`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_convergence.py -v`
+Expected: FAIL — the coordinator rejects `federated_averaging` or the driver cannot import, depending on what is missing.
 
-- [ ] **Step 3: Write the fixture, demo script, and guide**
+- [ ] **Step 3: Make it pass, then write the demo script and guide**
 
-Build `fedavg_cluster` in `tests/integration/conftest.py` following the existing
-lease-test pattern. Three environment rules that have already cost debugging
-time and will silently break this if ignored:
+Debug against the real coordinator until both tests pass. Expect to iterate
+here — this is the first time the pieces meet. Known traps:
 
-1. **Set a neutral `cwd` for every subprocess.** Launching from the workspace
-   root makes `flashruntime/` resolve as a namespace package and fail
-   strangely (`HANDOFF.md` §3). `e2e/run_demo.py` shows the pattern.
-2. **Do not use pytest `tmp_path` for agent workdirs** — under colima it
-   bind-mounts as an EMPTY directory. Use `FLASHNODE_WORKDIR` under `$HOME`
-   (2026-07-29 gotcha (b)).
-3. **Run subprocesses with `python -u`** — uvicorn and pipes buffer stdout, so
-   the demo appears to hang (`HANDOFF.md` §3).
+1. **cwd must be the flashruntime repo root**, never the workspace root: from
+   there `flashruntime/` resolves as a namespace package and imports fail
+   confusingly (`HANDOFF.md` §3).
+2. **`python -u`** or the coordinator's output buffers and it looks hung.
+3. The coordinator hosts artifacts only when `FLASHML_LOCAL_ARTIFACTS_DIR` is
+   set — without it the PUT/GET round trip fails.
+4. `PUT /v1alpha1/artifacts/{key}` and the commit `output_sha256` must agree
+   byte-for-byte; the coordinator re-hashes and a mismatch fails the attempt
+   rather than committing.
 
-`scripts/fedavg_local_demo.py` should print a line per round:
+`scripts/fedavg_local_demo.py` runs the same loop as a human-watchable demo and
+prints one line per round:
 
 ```
 round 0  participants 2/2  mean_loss 0.7031
 round 1  participants 2/2  mean_loss 0.6402
 ...
-converged: 0.7031 -> 0.4118 over 5 rounds
+converged: 0.7031 -> 0.4118 over 4 rounds
 ```
 
-Write `docs/site/guides/federated-averaging.md` covering: why rounds and not
-DDP (the `--network none` rendezvous constraint), the quorum rule, the
-`flashml.yaml` shape, and an explicit statement that this proves collaborative
-training rather than faster training (spec §10).
+It must exit non-zero if the final loss is not below the first — a demo that
+prints numbers nobody checks is not evidence.
 
-- [ ] **Step 4: Run the demo and the integration test**
+`docs/site/guides/federated-averaging.md` covers: why rounds and not DDP (the
+`--network none` rendezvous constraint), the quorum rule and why late deltas
+are discarded, the `flashml.yaml` shape, and an explicit statement that this
+proves collaborative training rather than *faster* training (spec §10).
+
+- [ ] **Step 4: Run the demo and the tests**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -u scripts/fedavg_local_demo.py`
-Expected: 5 rounds print, final loss below the first
+Expected: 4 rounds print, final loss below the first, exit 0
 
-Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/integration/test_fedavg_e2e.py -m integration -v`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_fedavg_convergence.py -v`
 Expected: 2 passed
 
 - [ ] **Step 5: Run the full suite and docs check**
 
-Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest -q && .venv/bin/python scripts/build_docs.py --check && ./scripts/audit_secrets.sh`
+Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest -q && PATH="$PWD/.venv/bin:$PATH" .venv/bin/python scripts/build_docs.py --check && ./scripts/audit_secrets.sh`
 Expected: ≥319 pre-existing passed plus the ~40 added by this plan; docs check OK; secrets CLEAN
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add scripts/fedavg_local_demo.py tests/integration/test_fedavg_e2e.py \
-        tests/integration/conftest.py docs/site/guides/federated-averaging.md
-git commit -m "feat(fedavg): two-agent convergence demo and integration test
+git add tests/test_fedavg_convergence.py scripts/fedavg_local_demo.py \
+        docs/site/guides/federated-averaging.md
+git commit -m "feat(fedavg): convergence proven against a real coordinator
 
-Proves the premise across real process boundaries: 5 rounds across 2 agents
-reduce loss, and a round still completes on quorum when one agent dies
-mid-run. Guide states plainly that this proves collaborative training, not
-faster training."
+Two independent workers jointly reduce one model's loss over real HTTP:
+real expansion, real leases, real artifact storage, real commit-time sha256
+validation. A round still aggregates when a third shard never reports.
+
+The agent here is a few lines of urllib, not flashnode: CLAUDE.md rule #1
+forbids this repo depending on flashnode. Task 6b proves the same loop with
+genuine ExecutorLoop agents in the workspace e2e/ suite."
+```
+
+---
+
+### Task 6b: The same loop with genuine agents (workspace `e2e/`)
+
+**Files:**
+- Create: `../e2e/test_fedavg_loop.py`
+
+**Interfaces:**
+- Consumes: the `coordinator` fixture already in `../e2e/conftest.py`.
+
+Task 6 proves the round loop inside flashruntime with a hand-rolled agent.
+This proves it with the real one. `e2e/` is the only place allowed to import
+both repos — `e2e/test_local_loop.py` already does
+`from flashnode.executor import CoordinatorClient, ExecutorLoop, SubprocessRunner`
+and drives agents as threads against the `coordinator` fixture. Follow that
+file's structure exactly.
+
+- [ ] **Step 1: Write the failing test**
+
+Model it on `e2e/test_local_loop.py`: build two `ExecutorLoop` instances with
+`SubprocessRunner`, run each in a thread against the `coordinator` fixture,
+and drive `run_fedavg` from the main thread. Assert:
+- 3 rounds complete with 2 participants each and decreasing mean loss;
+- when one loop is stopped after round 1, the remaining rounds still complete
+  with `participants == 1` and `min_participants=1` — the closed-laptop case.
+
+Reuse `WORKER_PARAMS` and `_initial_weights` from Task 6 by importing them, or
+duplicate them locally if the import crosses an awkward boundary; do not
+invent different values, or the two tests stop being comparable.
+
+- [ ] **Step 2: Run and iterate**
+
+Run: `cd .. && make e2e` (or `PATH=... pytest e2e/test_fedavg_loop.py -v` from
+the workspace root — check `e2e/README.md` for the invocation this workspace
+uses).
+
+Note `SubprocessRunner` executes `python -m flashml_workloads.fedavg_worker`,
+so the agents' environment needs torch importable. If the e2e venv lacks
+torch, either install it there or mark this test to skip with a clear reason —
+**skipping silently is not acceptable**; the skip message must say torch is
+missing so nobody reads a skip as a pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd .. && git add e2e/test_fedavg_loop.py
+git commit -m "test(e2e): federated averaging across two genuine flashnode agents"
 ```
 
 ---
