@@ -14,6 +14,8 @@ container.
 
 from __future__ import annotations
 
+import math
+
 __all__ = [
     "WeightShapeMismatch",
     "apply_delta",
@@ -47,9 +49,29 @@ def _require_same_params(a: dict, b: dict) -> None:
             f"parameter names differ: {sorted(a.keys())} vs {sorted(b.keys())}"
         )
     for name in a:
-        if a[name]["shape"] != b[name]["shape"]:
+        shape_a = a[name]["shape"]
+        shape_b = b[name]["shape"]
+
+        if shape_a != shape_b:
             raise WeightShapeMismatch(
-                f"parameter {name!r} shape {a[name]['shape']} vs {b[name]['shape']}"
+                f"parameter {name!r} shape {shape_a} vs {shape_b}"
+            )
+
+        # Both shapes are the same; compute expected data length.
+        # Empty shape (scalar) has product 1.
+        expected_len = math.prod(shape_a) if shape_a else 1
+
+        # Validate that data length matches declared shape in both blobs.
+        data_len_a = len(a[name]["data"])
+        if data_len_a != expected_len:
+            raise WeightShapeMismatch(
+                f"parameter {name!r} declared shape {shape_a} (product {expected_len}) but data has length {data_len_a}"
+            )
+
+        data_len_b = len(b[name]["data"])
+        if data_len_b != expected_len:
+            raise WeightShapeMismatch(
+                f"parameter {name!r} declared shape {shape_b} (product {expected_len}) but data has length {data_len_b}"
             )
 
 
@@ -86,12 +108,20 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
     if not contributions:
         raise ValueError("reduce_deltas: no contributions")
     total = sum(n for _, n in contributions)
-    if total <= 0:
+    if total < 0:
+        raise ValueError("reduce_deltas: negative total samples")
+    if total == 0:
         raise ValueError("reduce_deltas: zero total samples")
 
     first = contributions[0][0]
-    for blob, _ in contributions[1:]:
-        _require_same_params(first, blob)
+    # Validate first blob's internal consistency and all subsequent blobs.
+    for i, (blob, _) in enumerate(contributions):
+        if i == 0:
+            # Validate first blob against itself for internal consistency.
+            _require_same_params(first, blob)
+        else:
+            # Validate subsequent blobs against first.
+            _require_same_params(first, blob)
 
     out: dict = {}
     for name in first:

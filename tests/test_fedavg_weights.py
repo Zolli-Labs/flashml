@@ -59,3 +59,39 @@ def test_reduce_deltas_rejects_mismatched_shapes():
 def test_reduce_deltas_rejects_mismatched_param_names():
     with pytest.raises(WeightShapeMismatch):
         reduce_deltas([(_blob(w=[1.0]), 1), (_blob(bias=[1.0]), 1)])
+
+
+def test_subtract_rejects_mismatched_data_length():
+    """Data length must match declared shape product; silent truncation is a bug."""
+    new = {"w": {"shape": [2], "data": [1.0, 2.0, 3.0]}}  # 3 elements but shape says 2
+    base = {"w": {"shape": [2], "data": [5.0, 6.0]}}
+    with pytest.raises(WeightShapeMismatch):
+        subtract(new, base)
+
+
+def test_apply_delta_rejects_mismatched_data_length():
+    """Data length must match declared shape product."""
+    base = {"w": {"shape": [2], "data": [1.0, 1.0]}}
+    delta = {"w": {"shape": [2], "data": [2.0, 4.0, 6.0]}}  # 3 elements but shape says 2
+    with pytest.raises(WeightShapeMismatch):
+        apply_delta(base, delta, scale=0.5)
+
+
+def test_reduce_deltas_rejects_internal_data_length_mismatch():
+    """Each contribution's data length must match its declared shape."""
+    # Second blob has 2 data elements but declares shape [3]
+    with pytest.raises(WeightShapeMismatch):
+        reduce_deltas([
+            ({"w": {"shape": [3], "data": [1.0, 1.0, 1.0]}}, 1),
+            ({"w": {"shape": [3], "data": [9.0, 9.0]}}, 1)
+        ])
+
+
+def test_scalar_parameter_with_empty_shape():
+    """A parameter with shape [] (scalar) should have exactly 1 data element."""
+    # Scalar: shape [] has product 1
+    scalar = {"s": {"shape": [], "data": [42.0]}}
+    assert decode(encode({"s": ([], [42.0])})) == {"s": ([], [42.0])}
+    assert subtract({"s": {"shape": [], "data": [5.0]}}, {"s": {"shape": [], "data": [2.0]}}) == {"s": {"shape": [], "data": [3.0]}}
+    assert apply_delta({"s": {"shape": [], "data": [10.0]}}, {"s": {"shape": [], "data": [3.0]}}, scale=2.0) == {"s": {"shape": [], "data": [16.0]}}
+    assert reduce_deltas([({"s": {"shape": [], "data": [7.0]}}, 5)]) == {"s": {"shape": [], "data": [7.0]}}
