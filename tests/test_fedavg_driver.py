@@ -250,3 +250,79 @@ def test_on_round_callback_receives_progress():
                initial_weights={"w": {"shape": [1], "data": [0.0]}})
     assert [s["round"] for s in seen] == [0, 1]
     assert all("mean_loss" in s for s in seen)
+
+
+from flashml_workloads.fedavg_driver import HttpCoordinator, resume_state
+
+
+def test_http_coordinator_sends_auth_headers(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        captured.update({"method": method, "url": url, "headers": headers or {}})
+        return {"job_id": "job-r0"}
+
+    coord = HttpCoordinator("http://c:8100", headers={"Authorization": "Bearer t"})
+    monkeypatch.setattr(coord, "_request", fake_request)
+    coord.submit({"spec": {}})
+    assert captured["headers"]["Authorization"] == "Bearer t"
+    assert captured["url"] == "http://c:8100/v1alpha1/jobs"
+
+
+def test_resume_state_finds_last_completed_round():
+    # 42.0 is deliberately unlike any delta value in `commits` — if the fake
+    # ever re-derives a delta for this key instead of returning what was PUT,
+    # this assertion must fail rather than coincide.
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+    fake.uploaded["jobs/job-r0/round-000/weights.json"] = {
+        "w": {"shape": [1], "data": [42.0]}
+    }
+    next_round, weights, uri = resume_state(fake, ["job-r0"])
+    assert next_round == 1
+    assert weights["w"]["data"] == [42.0]
+    assert uri == "artifact://jobs/job-r0/round-000/weights.json"
+
+
+def test_resume_state_picks_the_newest_round_not_the_first():
+    fake = FakeCoordinator({})
+    fake.uploaded["jobs/job-r0/round-000/weights.json"] = {"w": {"shape": [1], "data": [1.0]}}
+    fake.uploaded["jobs/job-r1/round-001/weights.json"] = {"w": {"shape": [1], "data": [2.0]}}
+    next_round, weights, _ = resume_state(fake, ["job-r0", "job-r1"])
+    assert next_round == 2
+    assert weights["w"]["data"] == [2.0]
+
+
+def test_resume_state_skips_a_round_that_never_aggregated():
+    # Round 1 was submitted but crashed before writing weights: resume at 1.
+    fake = FakeCoordinator({})
+    fake.uploaded["jobs/job-r0/round-000/weights.json"] = {"w": {"shape": [1], "data": [7.0]}}
+    next_round, weights, _ = resume_state(fake, ["job-r0", "job-r1"])
+    assert next_round == 1
+    assert weights["w"]["data"] == [7.0]
+
+
+def test_resume_state_propagates_transport_errors():
+    """An unreachable coordinator must NOT look like 'no rounds completed' —
+    that would silently restart a finished run from scratch."""
+    class Unreachable(FakeCoordinator):
+        def get_artifact(self, key):
+            raise ConnectionError("coordinator unreachable")
+
+    with pytest.raises(ConnectionError):
+        resume_state(Unreachable({}), ["job-r0"])
+
+
+def test_resume_state_on_empty_history_starts_at_zero():
+    fake = FakeCoordinator({})
+    assert resume_state(fake, []) == (0, {}, None)
+
+
+def test_run_fedavg_resumes_from_start_round():
+    fake = FakeCoordinator({1: [(0, 1.0, 10), (1, 1.0, 10)]})
+    result = run_fedavg(fake, rounds=2, num_shards=2, min_participants=2,
+                        worker_params=_params(), start_round=1,
+                        initial_weights={"w": {"shape": [1], "data": [5.0]}},
+                        weights_uri="artifact://jobs/job-r0/round-000/weights.json")
+    # Only round 1 runs; weights walk 5.0 -> 6.0
+    assert [h["round"] for h in result["history"]] == [1]
+    assert result["weights"]["w"]["data"] == [pytest.approx(6.0)]

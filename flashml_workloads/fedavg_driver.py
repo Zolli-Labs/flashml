@@ -19,16 +19,19 @@ Pure stdlib: this runs inside the cloud API, which must not carry torch.
 
 from __future__ import annotations
 
+import json
 import re
 import time
+import urllib.error
+import urllib.request
 from typing import Any, Callable, Protocol, TypedDict
 
 from flashml_workloads.fedavg_weights import apply_delta, reduce_deltas
 
 _SAFE_DELTA_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-__all__ = ["ArtifactNotFound", "Coordinator", "QuorumNotMet", "RoundResult",
-           "run_fedavg"]
+__all__ = ["ArtifactNotFound", "Coordinator", "HttpCoordinator", "QuorumNotMet",
+           "RoundResult", "resume_state", "run_fedavg"]
 
 
 class QuorumNotMet(RuntimeError):
@@ -129,6 +132,79 @@ def _fetch(coord: Coordinator, metrics_keys: list[str]) -> list[tuple[dict, int,
     return out
 
 
+class HttpCoordinator:
+    """`Coordinator` over the coordinator's HTTP API.
+
+    `headers` carries the caller's credentials — the cloud API passes the
+    machine/service token here rather than the driver knowing anything
+    about auth.
+    """
+
+    def __init__(self, base_url: str, headers: dict[str, str] | None = None):
+        self.base_url = base_url.rstrip("/")
+        self.headers = dict(headers or {})
+
+    def _request(self, method: str, url: str, data: bytes | None = None,
+                 headers: dict | None = None, timeout: float | None = 60.0):
+        req = urllib.request.Request(url, data=data, method=method)
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+        return json.loads(raw) if raw else None
+
+    def submit(self, body: dict) -> dict:
+        return self._request("POST", f"{self.base_url}/v1alpha1/jobs",
+                             data=json.dumps(body).encode(), headers=self.headers)
+
+    def job_state(self, job_id: str) -> str:
+        return self._request("GET", f"{self.base_url}/v1alpha1/jobs/{job_id}",
+                             headers=self.headers)["state"]
+
+    def artifacts(self, job_id: str) -> list[dict]:
+        return self._request("GET", f"{self.base_url}/v1alpha1/jobs/{job_id}/artifacts",
+                             headers=self.headers)
+
+    def get_artifact(self, key: str):
+        try:
+            return self._request("GET", f"{self.base_url}/v1alpha1/artifacts/{key}",
+                                 headers=self.headers)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise ArtifactNotFound(key) from None
+            raise   # 5xx / auth failures are NOT "round never completed"
+
+    def put_artifact(self, key: str, body) -> None:
+        self._request("PUT", f"{self.base_url}/v1alpha1/artifacts/{key}",
+                      data=json.dumps(body).encode(), headers=self.headers)
+
+
+def resume_state(coord: Coordinator, job_ids: list[str]) -> tuple[int, dict, str | None]:
+    """Where to restart after a driver crash.
+
+    `job_ids[r]` is the job submitted for round r — they are appended in
+    order, so the round index and the list index are the same thing. Rounds
+    are idempotent: the weights artifact is written only AFTER a round
+    aggregates, so the newest one that exists names the last round that
+    fully completed.
+
+    Only ArtifactNotFound is swallowed. A transport error must propagate:
+    silently treating an unreachable coordinator as "no rounds done" would
+    restart a finished run from scratch.
+    """
+    for r in range(len(job_ids) - 1, -1, -1):
+        key = f"jobs/{job_ids[r]}/round-{r:03d}/weights.json"
+        try:
+            weights = coord.get_artifact(key)
+        except ArtifactNotFound:
+            continue
+        if weights:
+            return r + 1, weights, f"artifact://{key}"
+    return 0, {}, None
+
+
 def run_fedavg(
     coord: Coordinator,
     *,
@@ -141,6 +217,8 @@ def run_fedavg(
     poll_seconds: float = 1.0,
     lease_seconds: float = 120.0,
     on_round: Callable[[RoundResult], None] | None = None,
+    start_round: int = 0,
+    weights_uri: str | None = None,
 ) -> dict:
     if min_participants < 1:
         raise ValueError("min_participants must be >= 1")
@@ -150,11 +228,10 @@ def run_fedavg(
         )
 
     weights = initial_weights
-    weights_uri: str | None = None
     history: list[RoundResult] = []
     job_ids: list[str] = []
 
-    for r in range(rounds):
+    for r in range(start_round, rounds):
         job_id = coord.submit(
             _round_body(r, num_shards, worker_params, weights_uri, lease_seconds)
         )["job_id"]
