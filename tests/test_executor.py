@@ -269,16 +269,28 @@ def test_client_sends_join_code_header_on_register(monkeypatch):
     assert seen["headers"].get("X-FlashML-Join-Code") == "LOCAL-2026"
 
 
-def test_work_cli_refuses_docker_runner_without_image_allowlist(monkeypatch, capsys):
-    """`flashnode work --runner docker` with no FLASHNODE_ALLOWED_IMAGES
-    must exit with an error before touching the network — an empty image
-    allowlist would make every task fail closed anyway."""
+def test_work_cli_docker_runner_needs_no_image_allowlist_env_var(monkeypatch, capsys):
+    """The one-command volunteer setup depends on this.
+
+    `flashnode work --runner docker` with no FLASHNODE_ALLOWED_IMAGES must
+    get past the allowlist gate — the built-in namespace prefix
+    (executor/images.py) is what a donated machine runs on. Removing the
+    `docker` binary keeps the CLI exiting early so this stays a unit test;
+    the assertion is on *which* gate rejected it.
+    """
+    import shutil
+
     from flashnode.agent import cli
 
     monkeypatch.delenv("FLASHNODE_ALLOWED_IMAGES", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
     rc = cli.main(["work", "--runner", "docker", "--coordinator", "http://localhost:1"])
     assert rc == 2
-    assert "FLASHNODE_ALLOWED_IMAGES" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "docker" in err
+    assert "FLASHNODE_ALLOWED_IMAGES" not in err
+
 
 
 @pytest.mark.parametrize("runner", ["docker", "argv"])

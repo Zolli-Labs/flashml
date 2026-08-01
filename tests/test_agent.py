@@ -74,12 +74,30 @@ def test_heartbeat_failure_is_reported_not_raised(monkeypatch, tmp_path):
     assert agent.heartbeat_once() is False
 
 
-def test_argv_runner_requires_an_image_allowlist(monkeypatch, capsys):
-    """Refuse to start rather than silently degrade to an unsandboxed tier."""
+def test_argv_runner_starts_without_an_image_allowlist_env_var(monkeypatch, capsys):
+    """A volunteer sets no env var.
+
+    The built-in namespace allowlist is what they run on, so an unset
+    FLASHNODE_ALLOWED_IMAGES must NOT be a refusal to start. It used to be,
+    which capped the fleet at the number of owners willing to hand-maintain a
+    list of image references — and stranded every host on the old image each
+    time we published a new one.
+
+    Exercised by removing the `docker` binary so the CLI still exits early;
+    what is asserted is *which* gate stopped it. The allowlist gate is gone,
+    the docker-binary gate remains.
+    """
+    import shutil
+
     from flashnode.agent.cli import main
+
     monkeypatch.delenv("FLASHNODE_ALLOWED_IMAGES", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
     assert main(["work", "--runner", "argv"]) == 2
-    assert "FLASHNODE_ALLOWED_IMAGES" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "docker" in err
+    assert "FLASHNODE_ALLOWED_IMAGES" not in err
 
 
 @pytest.mark.parametrize("runner,expect_module_capable", [

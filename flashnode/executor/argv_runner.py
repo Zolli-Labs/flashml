@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 from flashnode.executor.hardening import container_name, harden_args
+from flashnode.executor.images import DEFAULT_ALLOWED_IMAGE_PREFIXES, image_is_allowed
 from flashnode.executor.runner import TaskExecutionError
 
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -29,13 +30,15 @@ _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 class ArgvDockerRunner:
     def __init__(
         self,
-        allowed_images: frozenset[str],
+        allowed_images: frozenset[str] = frozenset(),
         cpus: float = 2.0,
         memory_gb: float = 2.0,
         timeout_seconds: float = 3600.0,
         max_output_bytes: int = 2 * 1024**3,
+        allowed_image_prefixes: frozenset[str] = DEFAULT_ALLOWED_IMAGE_PREFIXES,
     ):
         self.allowed_images = allowed_images
+        self.allowed_image_prefixes = allowed_image_prefixes
         self.cpus = cpus
         self.memory_gb = memory_gb
         self.timeout_seconds = timeout_seconds
@@ -49,7 +52,9 @@ class ArgvDockerRunner:
         # Checked BEFORE any subprocess call, so a hostile value such as
         # "--privileged" can never reach docker's flag parser.
         image = payload.get("image")
-        if not image or image not in self.allowed_images:
+        if not image or not image_is_allowed(
+            image, self.allowed_images, self.allowed_image_prefixes
+        ):
             raise TaskExecutionError(f"image {image!r} is not allowlisted — refusing to run")
 
         env_args: list[str] = []

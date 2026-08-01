@@ -89,7 +89,7 @@ def _work(args: list[str]) -> int:
         "--runner",
         choices=["subprocess", "docker", "argv"],
         default=os.environ.get("FLASHNODE_RUNNER", "subprocess"),
-        help="task execution tier (docker/argv need FLASHNODE_ALLOWED_IMAGES)",
+        help="task execution tier (docker/argv need the docker CLI on PATH)",
     )
     parser.add_argument("--max-tasks", type=int, default=None)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
@@ -97,20 +97,20 @@ def _work(args: list[str]) -> int:
 
     runner = None
     if opts.runner in ("docker", "argv"):
-        # Shared by both sandboxed tiers: neither may start against an empty
-        # allowlist, so the check is hoisted here rather than duplicated per
-        # branch.
+        # OPTIONAL, and additive. The built-in namespace allowlist
+        # (executor/images.py DEFAULT_ALLOWED_IMAGE_PREFIXES) is what a
+        # volunteer runs on, so this env var is no longer required and an
+        # empty value is no longer a refusal to start.
+        #
+        # It used to be mandatory, which quietly capped the project at the
+        # number of machines whose owners would hand-maintain a list of image
+        # references: every image we published stranded every host until its
+        # owner edited the variable, so security fixes would reach a fraction
+        # of the fleet. Setting it now means "also allow these", for
+        # self-hosting the stack or for integration tests.
         images = frozenset(
             i.strip() for i in os.environ.get("FLASHNODE_ALLOWED_IMAGES", "").split(",") if i.strip()
         )
-        if not images:
-            print(
-                f"flashnode work: --runner {opts.runner} requires FLASHNODE_ALLOWED_IMAGES "
-                "(comma-separated image references) — refusing to start with an "
-                "empty allowlist",
-                file=sys.stderr,
-            )
-            return 2
         # Both sandboxed tiers shell out to the `docker` binary directly
         # (subprocess.run(["docker", ...])); if it isn't installed that call
         # raises FileNotFoundError deep inside a task attempt. Check for it

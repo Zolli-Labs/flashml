@@ -20,19 +20,26 @@ import subprocess
 from pathlib import Path
 
 from flashnode.executor.hardening import CONTAINER_WORKDIR, container_name, harden_args
+from flashnode.executor.images import DEFAULT_ALLOWED_IMAGE_PREFIXES, image_is_allowed
 from flashnode.executor.runner import DEFAULT_ALLOWED_MODULES, TaskExecutionError
 
 
 class DockerRunner:
     def __init__(
         self,
-        allowed_images: frozenset[str],
+        allowed_images: frozenset[str] = frozenset(),
         allowed_modules: frozenset[str] = DEFAULT_ALLOWED_MODULES,
         cpus: float = 2.0,
         memory_gb: float = 2.0,
         timeout_seconds: float = 900.0,
+        allowed_image_prefixes: frozenset[str] = DEFAULT_ALLOWED_IMAGE_PREFIXES,
     ):
+        # `allowed_images` now defaults to empty because the built-in
+        # namespace prefix is what a volunteer runs on. An empty exact list
+        # is no longer the "refusing to start" condition it once was — see
+        # executor/images.py for the two-knob model.
         self.allowed_images = allowed_images
+        self.allowed_image_prefixes = allowed_image_prefixes
         self.allowed_modules = allowed_modules
         self.cpus = cpus
         self.memory_gb = memory_gb
@@ -45,7 +52,7 @@ class DockerRunner:
         image = payload.get("image")
         if not image:
             raise TaskExecutionError("payload carries no image — the docker runner requires one")
-        if image not in self.allowed_images:
+        if not image_is_allowed(image, self.allowed_images, self.allowed_image_prefixes):
             raise TaskExecutionError(f"image {image!r} is not allowlisted — refusing to run")
 
         workdir = Path(workdir)
