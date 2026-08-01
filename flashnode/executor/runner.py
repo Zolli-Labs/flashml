@@ -24,7 +24,12 @@ import sys
 from pathlib import Path
 
 DEFAULT_ALLOWED_MODULES = frozenset(
-    {"flashml_workloads.sklearn_trial", "flashml_workloads.kmeans_shard", "flashml_workloads.sgd_trainer"}
+    {
+        "flashml_workloads.sklearn_trial",
+        "flashml_workloads.kmeans_shard",
+        "flashml_workloads.sgd_trainer",
+        "flashml_workloads.fedavg_worker",
+    }
 )
 
 # The only environment a task subprocess inherits. Everything else — join
