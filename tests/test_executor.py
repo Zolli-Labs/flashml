@@ -353,3 +353,212 @@ def test_loop_honors_workdir_base(stub, fake_module, tmp_path):
     )
     assert loop.run(max_tasks=1, idle_exit=True) == 1
     assert seen and seen[0].startswith(str(base))
+
+
+# -- unpacking an archive input ---------------------------------------------
+#
+# The cross-repo seam this exists for: the cloud API compiles argv as
+# `python /work/inputs/code/<entrypoint>` and stages the repo *tarball* as
+# the `code` input. Downloading it as a plain file leaves the argv pointing
+# at a directory that never exists, and every attempt burns on "file not
+# found". Unpacking is opt-in per input, never inferred from a filename the
+# submitter chose.
+
+
+def _repo_tarball(entrypoint: str = "train.py", top: str = "repo-abc123") -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        d = tarfile.TarInfo(name=top + "/")
+        d.type = tarfile.DIRTYPE
+        tar.addfile(d)
+        body = b"print('hi')\n"
+        f = tarfile.TarInfo(name=f"{top}/{entrypoint}")
+        f.size = len(body)
+        f.type = tarfile.REGTYPE
+        tar.addfile(f, io.BytesIO(body))
+    return buf.getvalue()
+
+
+class InputSpyRunner(SubprocessRunner):
+    """Records what each input actually *is* at the moment the task would
+    see it, then produces a minimal valid output so the commit path runs.
+
+    Facts are snapshotted inside `run`, not returned as live paths: the
+    loop deletes the task's temporary workdir on the way out, so a Path
+    inspected after `loop.run()` returns describes a directory that no
+    longer exists and every `is_dir()` answers False.
+    """
+
+    def __init__(self):
+        self.seen: dict[str, dict] = {}
+
+    def run(self, payload, workdir, inputs):
+        for name, path in inputs.items():
+            fact = {
+                "is_dir": path.is_dir(),
+                "is_file": path.is_file(),
+                "name": path.name,
+                "parent": path.parent.name,
+                "siblings": sorted(p.name for p in path.parent.iterdir()),
+            }
+            if path.is_dir():
+                fact["listing"] = sorted(
+                    p.relative_to(path).as_posix() for p in path.rglob("*")
+                )
+                fact["files"] = {
+                    p.relative_to(path).as_posix(): p.read_bytes()
+                    for p in path.rglob("*") if p.is_file()
+                }
+            elif path.is_file():
+                fact["bytes"] = path.read_bytes()
+            self.seen[name] = fact
+        outdir = Path(workdir) / "out"
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "metrics.json").write_text("{}")
+        return outdir
+
+
+def test_listed_input_is_unpacked_to_a_directory(stub):
+    """`unpack_inputs: ["code"]` → inputs/code/ is a DIRECTORY holding the
+    repo, with GitHub's `owner-name-<sha>/` wrapper stripped, because that
+    is the path the compiled argv names."""
+    coordinator, client = stub
+    coordinator.artifacts["uploads/deadbeef/code.tar.gz"] = _repo_tarball()
+    coordinator.make_lease("t1", payload={
+        "task_id": "t1", "params": {},
+        "inputs": {"code": "artifact://uploads/deadbeef/code.tar.gz"},
+        "unpack_inputs": ["code"],
+    })
+    runner = InputSpyRunner()
+    assert ExecutorLoop(client, "n1", runner=runner).run(max_tasks=1, idle_exit=True) == 1
+
+    code = runner.seen["code"]
+    assert code["is_dir"], "an unpacked input must be handed over as a directory"
+    assert code["name"] == "code"
+    assert code["parent"] == "inputs"
+    # the entrypoint sits where `python /work/inputs/code/train.py` expects
+    assert code["files"]["train.py"] == b"print('hi')\n"
+    # GitHub's wrapper directory is gone, not nested one level down
+    assert code["listing"] == ["train.py"]
+    # the tarball itself is not left lying around inside inputs/
+    assert code["siblings"] == ["code"]
+
+
+def test_unlisted_input_keeps_todays_exact_behaviour(stub):
+    """An input nobody asked to unpack is downloaded as a plain file at
+    inputs/<basename>, byte for byte — even when it is obviously an
+    archive. Sniffing the extension would hand the decision to whoever
+    chose the artifact key."""
+    coordinator, client = stub
+    blob = _repo_tarball()
+    coordinator.artifacts["uploads/deadbeef/code.tar.gz"] = blob
+    coordinator.make_lease("t1", payload={
+        "task_id": "t1", "params": {},
+        "inputs": {"code": "artifact://uploads/deadbeef/code.tar.gz"},
+    })
+    runner = InputSpyRunner()
+    assert ExecutorLoop(client, "n1", runner=runner).run(max_tasks=1, idle_exit=True) == 1
+
+    code = runner.seen["code"]
+    assert code["is_file"]
+    assert code["name"] == "code.tar.gz"
+    assert code["bytes"] == blob
+
+
+def test_mixed_inputs_unpack_only_what_is_listed(stub):
+    coordinator, client = stub
+    coordinator.artifacts["uploads/x/code.tar.gz"] = _repo_tarball()
+    coordinator.artifacts["data/train.csv"] = b"1,2,3\n"
+    coordinator.make_lease("t1", payload={
+        "task_id": "t1", "params": {},
+        "inputs": {
+            "code": "artifact://uploads/x/code.tar.gz",
+            "dataset": "artifact://data/train.csv",
+        },
+        "unpack_inputs": ["code"],
+    })
+    runner = InputSpyRunner()
+    assert ExecutorLoop(client, "n1", runner=runner).run(max_tasks=1, idle_exit=True) == 1
+    assert runner.seen["code"]["is_dir"]
+    assert runner.seen["dataset"]["is_file"]
+    assert runner.seen["dataset"]["bytes"] == b"1,2,3\n"
+    assert runner.seen["dataset"]["name"] == "train.csv"
+
+
+def test_hostile_archive_fails_the_task_not_the_agent(stub):
+    """A traversal tarball must cost the submitter their task, not the
+    volunteer their node: reported through fail(), loop still running."""
+    import io
+    import tarfile
+
+    coordinator, client = stub
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="../../pwned.txt")
+        info.size = 5
+        info.type = tarfile.REGTYPE
+        tar.addfile(info, io.BytesIO(b"owned"))
+    coordinator.artifacts["uploads/evil/code.tar.gz"] = buf.getvalue()
+    coordinator.make_lease("t1", payload={
+        "task_id": "t1", "params": {},
+        "inputs": {"code": "artifact://uploads/evil/code.tar.gz"},
+        "unpack_inputs": ["code"],
+    })
+    runner = InputSpyRunner()
+    loop = ExecutorLoop(client, "n1", runner=runner)
+    assert loop.run(max_tasks=1, idle_exit=True) == 0
+    assert coordinator.failed and coordinator.failed[0][0] == "ls-t1"
+    assert "unsafe path" in coordinator.failed[0][1]
+    assert not runner.seen, "the runner must never have been reached"
+
+
+def test_unsafe_input_name_is_refused(stub):
+    """The input NAME becomes a directory name. A payload calling it
+    `../../.ssh` must fail the task, not write outside the workdir."""
+    coordinator, client = stub
+    coordinator.artifacts["uploads/x/code.tar.gz"] = _repo_tarball()
+    coordinator.make_lease("t1", payload={
+        "task_id": "t1", "params": {},
+        "inputs": {"../../escape": "artifact://uploads/x/code.tar.gz"},
+        "unpack_inputs": ["../../escape"],
+    })
+    loop = ExecutorLoop(client, "n1", runner=InputSpyRunner())
+    assert loop.run(max_tasks=1, idle_exit=True) == 0
+    assert "unsafe name" in coordinator.failed[0][1]
+
+
+def test_unpack_inputs_naming_a_missing_input_fails_loudly(stub):
+    coordinator, client = stub
+    coordinator.make_lease("t1", payload={
+        "task_id": "t1", "params": {}, "inputs": {}, "unpack_inputs": ["code"],
+    })
+    loop = ExecutorLoop(client, "n1", runner=InputSpyRunner())
+    assert loop.run(max_tasks=1, idle_exit=True) == 0
+    assert "do not exist" in coordinator.failed[0][1]
+
+
+def test_decompression_bomb_input_is_refused(stub):
+    import io
+    import tarfile
+
+    coordinator, client = stub
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        body = b"\0" * (4 * 1024 * 1024)
+        info = tarfile.TarInfo(name="repo/bomb.bin")
+        info.size = len(body)
+        info.type = tarfile.REGTYPE
+        tar.addfile(info, io.BytesIO(body))
+    coordinator.artifacts["uploads/bomb/code.tar.gz"] = buf.getvalue()
+    coordinator.make_lease("t1", payload={
+        "task_id": "t1", "params": {},
+        "inputs": {"code": "artifact://uploads/bomb/code.tar.gz"},
+        "unpack_inputs": ["code"],
+    })
+    loop = ExecutorLoop(client, "n1", runner=InputSpyRunner(),
+                        max_unpacked_bytes=64 * 1024)
+    assert loop.run(max_tasks=1, idle_exit=True) == 0
+    assert "size cap" in coordinator.failed[0][1]

@@ -60,8 +60,20 @@ never executes workloads — KubeRay owns workload pods. Tests: `pytest` (28 —
    coordinator restart), and the **checkpoint relay** (`_CheckpointRelay`:
    agent = courier because tasks are network-isolated — fetch latest
    manifest → `resume` input before the run; upload→register→commit each
-   new `ckpt/step-*.json` during it, final flush on death). CLI:
-   `flashnode work --coordinator URL`. Tests (28): stubbed transport +
+   new `ckpt/step-*.json` during it, final flush on death), and
+   **archive inputs** (`executor/archives.py`): an input named in the
+   payload's `unpack_inputs` list is extracted to `inputs/<name>/` and
+   handed to the runner as that *directory* — how a user's GitHub repo
+   reaches the argv `python /work/inputs/code/<entrypoint>`, with the
+   tarball's single wrapper directory stripped. Opt-in per input and never
+   inferred from a filename the submitter chose; inputs not listed keep the
+   plain-file behaviour byte for byte. The extractor refuses zip-slip
+   (relative *and* absolute), escaping symlinks, decompression bombs
+   (capped **during** extraction), member-count blowups, and
+   device/fifo/hardlink members. It duplicates the cloud API's guard
+   because of hard rule 2, and the drift that invites is caught by
+   `e2e/test_archive_parity.py` — one attack corpus, both extractors. CLI:
+   `flashnode work --coordinator URL`. Tests (116): stubbed transport +
    real-Docker (auto-skip); full loop + cross-machine training resume in
    workspace-root `e2e/`. Two heartbeats, never merged: attempt →
    coordinator (lease liveness), node → registry (online/offline). Wire
