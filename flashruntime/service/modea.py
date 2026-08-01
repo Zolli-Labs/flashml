@@ -310,6 +310,7 @@ class ModeAState:
         artifacts_dir: Path,
         join_code: str | None = None,
         max_artifact_bytes: int = 256 * 1024 * 1024,
+        authenticator: NodeAuthenticator | None = None,
     ):
         self.manager = manager
         self.artifacts_dir = artifacts_dir
@@ -317,6 +318,9 @@ class ModeAState:
         self.max_artifact_bytes = max_artifact_bytes
         self.nodes: dict[str, _NodeEntry] = {}
         self.lease_jobs: set[str] = set()  # job_ids running on the lease path
+        from flashruntime.service.auth import NodeAuthenticator, authenticator_from_env
+
+        self.authenticator: NodeAuthenticator = authenticator or authenticator_from_env()
 
     def node_view(self) -> list[dict]:
         now = datetime.now(timezone.utc)
@@ -365,6 +369,35 @@ def _safe_key(key: str) -> str:
     if key.startswith("/") or ".." in key.split("/"):
         raise HTTPException(status_code=400, detail=f"invalid artifact key: {key}")
     return key
+
+
+def _bearer(request: Request) -> str | None:
+    header = request.headers.get("Authorization") or ""
+    scheme, _, token = header.partition(" ")
+    return token.strip() if scheme.lower() == "bearer" and token.strip() else None
+
+
+def _authorize_write(state, manager, request: Request, key: str) -> None:
+    """Confine a write to the tasks this caller currently holds.
+
+    Not enforcing ⇒ allow: the self-hosted profile predates credentials and
+    must keep working (CLAUDE.md rule 4). When enforcing, an unknown caller is
+    401 and an out-of-scope key is 403 — distinct so an operator can tell a
+    misconfigured agent from a misbehaving one.
+    """
+    if not state.authenticator.enforcing:
+        return
+    node_id = state.authenticator.authenticate(_bearer(request))
+    if node_id is None:
+        raise HTTPException(status_code=401, detail="invalid or missing node token")
+    # Trailing slash is load-bearing: without it `jobs/j/trial-000extra/...`
+    # would satisfy a `jobs/j/trial-000` prefix test.
+    allowed = [f"jobs/{job}/{task}/" for job, task in manager.live_leases_for_node(node_id)]
+    if not any(key.startswith(p) for p in allowed):
+        raise HTTPException(
+            status_code=403,
+            detail=f"node {node_id} holds no live lease covering {key!r}",
+        )
 
 
 def build_router(state: ModeAState) -> APIRouter:
@@ -503,6 +536,7 @@ def build_router(state: ModeAState) -> APIRouter:
     @router.put("/artifacts/{key:path}")
     async def put_artifact(key: str, request: Request):
         key = _safe_key(key)
+        _authorize_write(state, manager, request, key)
         data = await request.body()
         if len(data) > state.max_artifact_bytes:
             raise HTTPException(
