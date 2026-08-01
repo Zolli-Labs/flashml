@@ -734,6 +734,16 @@ def test_isolation_is_stamped_so_placement_can_fail_closed():
 def test_rejects_zero_shards():
     with pytest.raises(ExpansionError, match="num_shards"):
         expand_tasks("job-1", _spec(num_shards=0))
+
+
+def test_rejects_a_spec_missing_worker_parameters():
+    """fedavg_worker reads every one of these unconditionally. Omitting the
+    check would defer the failure to a KeyError inside a container on a
+    volunteer's machine, burning an attempt and looking like a node fault."""
+    spec = _spec()
+    del spec.spec.workload.parameters["lr"]
+    with pytest.raises(ExpansionError, match="lr"):
+        expand_tasks("job-1", spec)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -798,12 +808,22 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
         "tier": spec.spec.isolation.tier,
         "allowFallback": spec.spec.isolation.allowFallback,
     }
+    # Every one of these is read unconditionally by fedavg_worker. Dropping a
+    # missing key here would defer the failure to a KeyError inside a container
+    # on a volunteer's machine, where it burns an attempt and reads as a node
+    # fault rather than a bad submission. Fail at expansion instead.
     worker_keys = ("local_steps", "lr", "batch_size", "seed",
                    "in_dim", "hidden", "out_dim", "dataset_size")
+    missing = [k for k in worker_keys if k not in p]
+    if missing:
+        raise ExpansionError(
+            f"federated_averaging is missing required parameters: {sorted(missing)}"
+        )
+
     tasks = []
     for shard in range(num_shards):
         task_id = f"shard-{shard:03d}"
-        params = {k: p[k] for k in worker_keys if k in p}
+        params = {k: p[k] for k in worker_keys}
         params.update({"round": int(p.get("round", 0)),
                        "shard": shard, "num_shards": num_shards})
         tasks.append(
@@ -830,7 +850,7 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd flashruntime && PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/test_service_fedavg.py tests/test_service_modea.py -v`
-Expected: 8 new passed; `test_service_modea.py` unchanged and green
+Expected: 9 new passed; `test_service_modea.py` unchanged and green
 
 - [ ] **Step 5: Commit**
 
