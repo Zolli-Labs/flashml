@@ -107,3 +107,29 @@ def test_rejects_weights_with_wrong_shapes(tmp_path):
     out.mkdir()
     with pytest.raises(WeightShapeMismatch):
         fedavg_worker.run_worker(_spec(tmp_path, weights_path=wpath, round=1), out)
+
+
+def test_batch_size_not_dividing_shard_still_yields_full_batches(tmp_path):
+    """samples=32, batch=12 truncates to 8 rows on step 2 under a naive
+    slice (start=24, 24:36 clipped to 24:32). The wrapped gather must still
+    feed exactly `batch` rows every step, so metrics/loss stay well-defined
+    and the run must not raise or silently reweight the loss."""
+    out = tmp_path / "out"
+    out.mkdir()
+    metrics = fedavg_worker.run_worker(
+        _spec(tmp_path, num_shards=2, batch_size=12, local_steps=3), out
+    )
+    assert metrics["samples"] == 32
+    assert isinstance(metrics["loss"], float)
+    delta = json.loads((out / "delta.json").read_text())
+    assert any(abs(v) > 1e-9 for p in delta.values() for v in p["data"])
+
+
+def test_empty_shard_raises_clear_error(tmp_path):
+    """num_shards > dataset_size leaves some shards with zero rows; this
+    must fail loudly with a clear message, not a bare ZeroDivisionError."""
+    out = tmp_path / "out"
+    out.mkdir()
+    spec = _spec(tmp_path, shard=10, num_shards=20, dataset_size=8)
+    with pytest.raises(ValueError, match="shard"):
+        fedavg_worker.run_worker(spec, out)

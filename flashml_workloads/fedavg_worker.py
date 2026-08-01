@@ -104,19 +104,25 @@ def run_worker(spec: dict, outdir: Path) -> dict:
 
     x, y = _make_shard(p)
     samples = int(x.shape[0])
+    if samples == 0:
+        raise ValueError(
+            f"shard {p['shard']} of num_shards={p['num_shards']} is empty "
+            f"for dataset_size={p['dataset_size']}: num_shards must not "
+            f"exceed dataset_size"
+        )
     opt = torch.optim.SGD(model.parameters(), lr=p["lr"])
     loss_fn = nn.CrossEntropyLoss()
     batch = p["batch_size"]
 
-    # Batches are indexed by step (cyclic slices, no RNG state to carry) so a
-    # retried attempt reproduces the same delta — same rule as sgd_trainer.
-    torch.manual_seed(p["seed"] + p["shard"])
+    # Batches are indexed by step via a wrapped, step-indexed gather (each
+    # index individually wrapped mod `samples`, not a single truncating
+    # slice) so every step sees exactly `batch` rows even when `batch` does
+    # not divide `samples` evenly — same rule as sgd_trainer. Pure function
+    # of `step`, no RNG state, so a retried attempt reproduces the same delta.
     last_loss = 0.0
     for step in range(p["local_steps"]):
-        start = (step * batch) % samples
-        xb, yb = x[start:start + batch], y[start:start + batch]
-        if xb.shape[0] == 0:
-            xb, yb = x[:batch], y[:batch]
+        idx = [(step * batch + i) % samples for i in range(batch)]
+        xb, yb = x[idx], y[idx]
         opt.zero_grad()
         loss = loss_fn(model(xb), yb)
         loss.backward()
@@ -134,7 +140,7 @@ def run_worker(spec: dict, outdir: Path) -> dict:
         "local_steps": p["local_steps"],
         "delta_file": "delta.json",
     }
-    (outdir / "metrics.json").write_text(json.dumps(metrics))
+    (outdir / "metrics.json").write_text(json.dumps(metrics, sort_keys=True))
     return metrics
 
 
