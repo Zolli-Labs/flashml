@@ -109,20 +109,35 @@ def test_rejects_weights_with_wrong_shapes(tmp_path):
         fedavg_worker.run_worker(_spec(tmp_path, weights_path=wpath, round=1), out)
 
 
-def test_batch_size_not_dividing_shard_still_yields_full_batches(tmp_path):
-    """samples=32, batch=12 truncates to 8 rows on step 2 under a naive
-    slice (start=24, 24:36 clipped to 24:32). The wrapped gather must still
-    feed exactly `batch` rows every step, so metrics/loss stay well-defined
-    and the run must not raise or silently reweight the loss."""
-    out = tmp_path / "out"
-    out.mkdir()
-    metrics = fedavg_worker.run_worker(
-        _spec(tmp_path, num_shards=2, batch_size=12, local_steps=3), out
-    )
-    assert metrics["samples"] == 32
-    assert isinstance(metrics["loss"], float)
-    delta = json.loads((out / "delta.json").read_text())
-    assert any(abs(v) > 1e-9 for p in delta.values() for v in p["data"])
+def test_batches_wrap_and_stay_full_size(tmp_path):
+    """batch_size that does not divide the shard evenly must still yield
+    full-size batches. Slicing (rather than wrapping) silently produced short
+    batches and reweighted those steps' loss."""
+    import flashml_workloads.fedavg_worker as w
+
+    sizes = []
+    real = w.build_model
+
+    def spy(*a, **k):
+        model = real(*a, **k)
+        fwd = model.forward
+
+        def wrapped(t):
+            sizes.append(int(t.shape[0]))
+            return fwd(t)
+
+        model.forward = wrapped
+        return model
+
+    # 64 rows / 2 shards = 32 samples; batch 12 does not divide 32.
+    w.build_model = spy
+    try:
+        out = tmp_path / "out"
+        out.mkdir()
+        w.run_worker(_spec(tmp_path, batch_size=12, local_steps=4), out)
+    finally:
+        w.build_model = real
+    assert sizes == [12, 12, 12, 12], f"short batch produced: {sizes}"
 
 
 def test_empty_shard_raises_clear_error(tmp_path):
