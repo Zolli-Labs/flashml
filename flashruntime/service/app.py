@@ -144,10 +144,16 @@ def create_app(settings: RuntimeSettings | None = None) -> FastAPI:
         join_code=settings.join_code,
         max_artifact_bytes=settings.max_artifact_mb * 1024 * 1024,
     )
+    if os.environ.get("FLASHML_REQUIRE_NODE_AUTH") == "1" and not modea_state.authenticator.enforcing:
+        raise RuntimeError(
+            "FLASHML_REQUIRE_NODE_AUTH=1 but no node tokens are configured — "
+            "set FLASHML_NODE_TOKENS. Refusing to start an internet-exposed "
+            "coordinator with unauthenticated writes."
+        )
     app.state.modea = modea_state
     app.include_router(modea.build_router(modea_state))
     checkpoint_catalog = CheckpointCatalog(on_event=lambda e: record_event(e))
-    app.include_router(checkpoints.build_router(checkpoint_catalog))
+    app.include_router(checkpoints.build_router(checkpoint_catalog, state=modea_state, manager=lease_manager))
     app.include_router(dashboard.build_router())
 
     def refresh_lease_job(job: JobRecord) -> JobRecord:

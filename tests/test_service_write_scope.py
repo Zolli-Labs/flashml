@@ -100,6 +100,47 @@ def test_a_sibling_prefix_does_not_satisfy_the_check(client):
     assert r.status_code == 403
 
 
+def test_checkpoint_part_outside_a_live_lease_is_403(client):
+    # Body shape matches RegisterPartRequest (attempt_id + nested part) —
+    # the brief's flat payload doesn't match the pre-existing checkpoint
+    # schema and would 422 before authorization ever runs.
+    _register(client, "node-a")
+    r = client.post(
+        "/v1alpha1/jobs/other-job/tasks/trial-000/checkpoints/parts",
+        json={"attempt_id": "at1", "step": 10,
+              "part": {"key": "jobs/other-job/trial-000/ckpt/step-10.json",
+                       "sha256": "0" * 64, "size_bytes": 2}},
+        headers={"Authorization": "Bearer tok-a"},
+    )
+    assert r.status_code == 403
+
+
+def test_checkpoint_part_without_a_token_is_401(client):
+    r = client.post(
+        "/v1alpha1/jobs/other-job/tasks/trial-000/checkpoints/parts",
+        json={"attempt_id": "at1", "step": 10,
+              "part": {"key": "k", "sha256": "0" * 64, "size_bytes": 2}},
+    )
+    assert r.status_code == 401
+
+
+def test_the_lease_holder_may_register_a_checkpoint_part(client):
+    _register(client, "node-a")
+    job_id = _submit_one_task_job(client)
+    lease = client.post("/v1alpha1/leases/claim", json={"node_id": "node-a"}).json()
+    task_id = lease["payload"]["task_id"]
+    key = f"jobs/{job_id}/{task_id}/ckpt/step-10.json"
+    client.put(f"/v1alpha1/artifacts/{key}", content=b"{}",
+               headers={"Authorization": "Bearer tok-a"})
+    r = client.post(
+        f"/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoints/parts",
+        json={"attempt_id": "at1", "step": 10,
+              "part": {"key": key, "sha256": "0" * 64, "size_bytes": 2}},
+        headers={"Authorization": "Bearer tok-a"},
+    )
+    assert r.status_code in (200, 201)
+
+
 def test_reads_are_not_scoped(client):
     """Drivers read other tasks' outputs and agents download shared inputs."""
     _register(client, "node-a")

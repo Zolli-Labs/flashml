@@ -14,11 +14,12 @@ records every commit event.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from flashruntime.checkpoint import CheckpointCatalog, CheckpointError
 from flashruntime.protocol.v1alpha1 import CheckpointPart
+from flashruntime.service.modea import authorize_task_write
 
 
 def _scope(job_id: str, task_id: str) -> str:
@@ -41,16 +42,18 @@ class CommitRequest(BaseModel):
     strategy_family: str = ""
 
 
-def build_router(catalog: CheckpointCatalog) -> APIRouter:
+def build_router(catalog: CheckpointCatalog, state, manager) -> APIRouter:
     router = APIRouter(prefix="/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoints")
 
     @router.post("/parts")
-    async def register_part(job_id: str, task_id: str, req: RegisterPartRequest):
+    async def register_part(job_id: str, task_id: str, req: RegisterPartRequest, request: Request):
+        authorize_task_write(state, manager, request, job_id, task_id)
         catalog.register_part(_scope(job_id, task_id), req.attempt_id, req.step, req.part)
         return {"status": "registered", "key": req.part.key}
 
     @router.post("/commit")
-    async def commit(job_id: str, task_id: str, req: CommitRequest):
+    async def commit(job_id: str, task_id: str, req: CommitRequest, request: Request):
+        authorize_task_write(state, manager, request, job_id, task_id)
         try:
             manifest = catalog.commit(
                 job_id=_scope(job_id, task_id),

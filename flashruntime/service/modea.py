@@ -400,6 +400,21 @@ def _authorize_write(state, manager, request: Request, key: str) -> None:
         )
 
 
+def authorize_task_write(state, manager, request: Request, job_id: str, task_id: str) -> None:
+    """Checkpoint routes name (job, task) in the path, so authorize the pair
+    directly instead of reconstructing a key prefix."""
+    if not state.authenticator.enforcing:
+        return
+    node_id = state.authenticator.authenticate(_bearer(request))
+    if node_id is None:
+        raise HTTPException(status_code=401, detail="invalid or missing node token")
+    if (job_id, task_id) not in manager.live_leases_for_node(node_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"node {node_id} holds no live lease on {job_id}/{task_id}",
+        )
+
+
 def build_router(state: ModeAState) -> APIRouter:
     router = APIRouter(prefix="/v1alpha1")
     manager = state.manager
