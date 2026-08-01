@@ -26,12 +26,25 @@ class FakeCoordinator:
     fake can never produce, and therefore can never use to catch an
     implementation that fetches deltas from inside the poll loop instead of
     once after quorum.
+
+    `extra_keys` ({round: [key, ...]}) injects artifact keys that no task in
+    the round legitimately owns — the recursive upload of a nested output
+    tree, or a key naming a shard index beyond `num_shards`.
+
+    `completed` ({round: [shard, ...]}) decouples "uploaded an artifact"
+    from "the coordinator ACCEPTED the commit". Uploads happen before the
+    commit is offered, so an attempt the coordinator rejected still leaves
+    its metrics.json behind; by default every committed shard is reported
+    COMPLETED, which is the honest case.
     """
 
-    def __init__(self, commits, param_name="w", reveal_at=None):
+    def __init__(self, commits, param_name="w", reveal_at=None,
+                 extra_keys=None, completed=None):
         self.commits = commits
         self.param_name = param_name
         self.reveal_at = reveal_at or {}
+        self.extra_keys = extra_keys or {}
+        self.completed = completed
         self.submitted = []
         self.uploaded = {}
         self.artifacts_calls = 0
@@ -56,7 +69,17 @@ class FakeCoordinator:
                 continue
             out.append({"key": f"jobs/{job_id}/shard-{shard:03d}/metrics.json"})
             out.append({"key": f"jobs/{job_id}/shard-{shard:03d}/delta.json"})
+        for key in self.extra_keys.get(r, []):
+            out.append({"key": key})
         return out
+
+    def tasks(self, job_id):
+        r = int(job_id.split("r")[1])
+        if self.completed is None:
+            shards = [e[0] for e in self.commits.get(r, [])]
+        else:
+            shards = self.completed.get(r, [])
+        return [{"task_id": f"shard-{s:03d}", "state": "COMPLETED"} for s in shards]
 
     def get_artifact(self, key):
         # Anything previously PUT wins. Without this the fake would
@@ -312,7 +335,7 @@ def test_resume_state_finds_last_completed_round():
     fake.uploaded["jobs/job-r0/round-000/weights.json"] = {
         "w": {"shape": [1], "data": [42.0]}
     }
-    next_round, weights, uri = resume_state(fake, ["job-r0"])
+    next_round, weights, uri = resume_state(fake, [(0, "job-r0")])
     assert next_round == 1
     assert weights["w"]["data"] == [42.0]
     assert uri == "artifact://jobs/job-r0/round-000/weights.json"
@@ -322,7 +345,7 @@ def test_resume_state_picks_the_newest_round_not_the_first():
     fake = FakeCoordinator({})
     fake.uploaded["jobs/job-r0/round-000/weights.json"] = {"w": {"shape": [1], "data": [1.0]}}
     fake.uploaded["jobs/job-r1/round-001/weights.json"] = {"w": {"shape": [1], "data": [2.0]}}
-    next_round, weights, _ = resume_state(fake, ["job-r0", "job-r1"])
+    next_round, weights, _ = resume_state(fake, [(0, "job-r0"), (1, "job-r1")])
     assert next_round == 2
     assert weights["w"]["data"] == [2.0]
 
@@ -331,7 +354,7 @@ def test_resume_state_skips_a_round_that_never_aggregated():
     # Round 1 was submitted but crashed before writing weights: resume at 1.
     fake = FakeCoordinator({})
     fake.uploaded["jobs/job-r0/round-000/weights.json"] = {"w": {"shape": [1], "data": [7.0]}}
-    next_round, weights, _ = resume_state(fake, ["job-r0", "job-r1"])
+    next_round, weights, _ = resume_state(fake, [(0, "job-r0"), (1, "job-r1")])
     assert next_round == 1
     assert weights["w"]["data"] == [7.0]
 
@@ -344,7 +367,7 @@ def test_resume_state_propagates_transport_errors():
             raise ConnectionError("coordinator unreachable")
 
     with pytest.raises(ConnectionError):
-        resume_state(Unreachable({}), ["job-r0"])
+        resume_state(Unreachable({}), [(0, "job-r0")])
 
 
 def test_resume_state_on_empty_history_starts_at_zero():
@@ -363,12 +386,12 @@ def test_resume_state_raises_on_present_but_empty_weights_artifact():
     fake = FakeCoordinator({})
     fake.uploaded["jobs/job-r0/round-000/weights.json"] = {}
     with pytest.raises(RuntimeError):
-        resume_state(fake, ["job-r0"])
+        resume_state(fake, [(0, "job-r0")])
 
     fake2 = FakeCoordinator({})
     fake2.uploaded["jobs/job-r0/round-000/weights.json"] = None
     with pytest.raises(RuntimeError):
-        resume_state(fake2, ["job-r0"])
+        resume_state(fake2, [(0, "job-r0")])
 
 
 def test_http_coordinator_get_artifact_maps_404_and_propagates_503(monkeypatch):
@@ -392,6 +415,274 @@ def test_http_coordinator_get_artifact_maps_404_and_propagates_503(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", raise_503)
     with pytest.raises(urllib.error.HTTPError):
         coord.get_artifact("jobs/job-r0/round-000/weights.json")
+
+
+# -- C1: quorum counts uploaded artifacts, not accepted commits -------------
+
+
+def test_quorum_ignores_metrics_files_outside_the_expected_task_set():
+    """A single lease must never mint more than one participant.
+
+    flashnode uploads a task's whole output tree RECURSIVELY (loop.py's
+    `rglob`), so a worker that writes `out/a/metrics.json` and
+    `out/b/metrics.json` gets both keys into the job's artifact listing. A
+    suffix test (`key.endswith("metrics.json")`) counts them as two more
+    participants bought with one lease — which both dilutes every honest
+    shard's weight and multiplies the attacker's. A key naming a shard index
+    beyond `num_shards` is the same trick with no lease at all.
+
+    Only shard 0 legitimately committed, so quorum of 2 must NOT be met.
+    """
+    fake = FakeCoordinator(
+        {0: [(0, 1.0, 10)]},
+        extra_keys={0: ["jobs/job-r0/shard-000/a/metrics.json",
+                        "jobs/job-r0/shard-000/b/metrics.json",
+                        "jobs/job-r0/shard-009/metrics.json",
+                        "jobs/job-r0/metrics.json"]},
+    )
+    with pytest.raises(QuorumNotMet, match="1 of 2"):
+        run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                   worker_params=_params(), round_timeout_s=0.2, poll_seconds=0.01,
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+
+def test_quorum_counts_only_tasks_the_coordinator_accepted():
+    """Artifacts are PUT before the commit is offered, so an attempt the
+    coordinator REJECTED (lost lease, sha256 mismatch, attempts exhausted)
+    still leaves its metrics.json in the bucket. Both shards uploaded here;
+    only shard 0's commit was accepted, so there is one participant, not two.
+    """
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 99.0, 10)]},
+                           completed={0: [0]})
+    with pytest.raises(QuorumNotMet, match="1 of 2"):
+        run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                   worker_params=_params(), round_timeout_s=0.2, poll_seconds=0.01,
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+
+def test_quorum_still_works_against_a_coordinator_without_a_tasks_view():
+    """The task cross-check is defence in depth, not a hard dependency: a
+    Coordinator implementation that predates `tasks()` must still run, with
+    the expected-key filter alone bounding the count at num_shards."""
+    class LegacyCoordinator:
+        """Exactly the five original Coordinator methods — no `tasks`."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def submit(self, body):
+            return self._inner.submit(body)
+
+        def job_state(self, job_id):
+            return self._inner.job_state(job_id)
+
+        def artifacts(self, job_id):
+            return self._inner.artifacts(job_id)
+
+        def get_artifact(self, key):
+            return self._inner.get_artifact(key)
+
+        def put_artifact(self, key, body):
+            return self._inner.put_artifact(key, body)
+
+    fake = LegacyCoordinator(FakeCoordinator({0: [(0, 1.0, 10), (1, 3.0, 10)]}))
+    assert not hasattr(fake, "tasks")
+    result = run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                        worker_params=_params(),
+                        initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    assert result["history"][0]["participants"] == 2
+
+
+# -- C2/C3: poisoned contributions must not reach the model -----------------
+
+
+def test_a_negative_sample_count_cannot_amplify_one_shards_delta():
+    """(delta=-999, n=-999) with (delta=1.0, n=1000) totals a healthy 1
+    sample but produces a weight of 999001.0 where the honest step is 1.0.
+    The round must fail, not aggregate."""
+    fake = FakeCoordinator({0: [(0, -999.0, -999), (1, 1.0, 1000)]})
+    with pytest.raises(ValueError, match="non-positive sample count"):
+        run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                   worker_params=_params(),
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+
+def test_a_nan_delta_raises_instead_of_poisoning_every_later_round():
+    """Without the guard: every weight becomes NaN, rounds 1..N train from
+    NaN weights, and run_fedavg still returns success."""
+    from flashml_workloads.fedavg_weights import NonFiniteWeights
+
+    fake = FakeCoordinator({r: [(0, float("nan"), 10), (1, 1.0, 10)]
+                            for r in range(3)})
+    with pytest.raises(NonFiniteWeights):
+        run_fedavg(fake, rounds=3, num_shards=2, min_participants=2,
+                   worker_params=_params(),
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+
+def test_an_inf_delta_raises_too():
+    from flashml_workloads.fedavg_weights import NonFiniteWeights
+
+    fake = FakeCoordinator({0: [(0, float("inf"), 10), (1, 1.0, 10)]})
+    with pytest.raises(NonFiniteWeights):
+        run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                   worker_params=_params(),
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+
+# -- I7: the round's image and isolation tier are caller-settable -----------
+
+
+def test_round_body_defaults_to_the_dev_image_and_standard_tier():
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+    run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+               worker_params=_params(),
+               initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    spec = fake.submitted[0][1]["spec"]
+    assert spec["image"] == {"repository": "local/tier1", "tag": "dev"}
+    assert spec["isolation"] == {"tier": "standard", "allowFallback": False}
+
+
+def test_image_and_isolation_tier_are_settable_by_the_caller():
+    """`local/tier1:dev` exists only in this repo's e2e fixtures. It is inert
+    today solely because SubprocessRunner ignores `image` — a docker-tier
+    volunteer would fail to pull it. The caller must be able to say what to
+    run, so the value is not pinned in two places that only agree by luck."""
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+    run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+               worker_params=_params(), image="ghcr.io/zolli/fedavg:1.2.3",
+               isolation_tier="sandboxed", allow_fallback=False,
+               initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    spec = fake.submitted[0][1]["spec"]
+    assert spec["image"] == {"repository": "ghcr.io/zolli/fedavg", "tag": "1.2.3"}
+    assert spec["isolation"]["tier"] == "sandboxed"
+
+
+def test_an_image_without_a_tag_is_rejected():
+    fake = FakeCoordinator({0: [(0, 1.0, 10)]})
+    with pytest.raises(ValueError, match="repository:tag"):
+        run_fedavg(fake, rounds=1, num_shards=1, min_participants=1,
+                   worker_params=_params(), image="ghcr.io/zolli/fedavg",
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+
+# -- I9: a transient coordinator error must not end a multi-round run -------
+
+
+def test_poll_retries_a_transient_coordinator_error():
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+    real_artifacts, real_state = fake.artifacts, fake.job_state
+    calls = {"artifacts": 0, "state": 0}
+
+    def flaky_artifacts(job_id):
+        calls["artifacts"] += 1
+        if calls["artifacts"] <= 2:
+            raise ConnectionError("connection reset by peer")
+        return real_artifacts(job_id)
+
+    def flaky_state(job_id):
+        calls["state"] += 1
+        raise urllib.error.HTTPError("u", 502, "Bad Gateway", None, None)
+
+    fake.artifacts = flaky_artifacts
+    fake.job_state = flaky_state
+
+    result = run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                        worker_params=_params(), poll_backoff_s=0.001,
+                        initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    assert result["history"][0]["participants"] == 2
+    assert calls["artifacts"] == 3  # two failures, then the real listing
+
+
+def test_poll_retries_are_bounded_and_fail_with_context():
+    """Retry, but never swallow indefinitely: a coordinator that is simply
+    gone must end the run with an explanation, not hang forever."""
+    from flashml_workloads.fedavg_driver import CoordinatorUnavailable
+
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+
+    def dead(job_id):
+        raise ConnectionError("coordinator unreachable")
+
+    fake.artifacts = dead
+    with pytest.raises(CoordinatorUnavailable,
+                       match="round 0: listing committed shards"):
+        run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                   worker_params=_params(), poll_backoff_s=0.001,
+                   round_timeout_s=5.0,
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+
+# -- I6: the round <-> list-index identity breaks on the SECOND resume ------
+
+
+def test_resume_state_rejects_a_bare_job_id_list():
+    fake = FakeCoordinator({})
+    with pytest.raises(TypeError, match="round, job_id"):
+        resume_state(fake, ["job-r0"])
+
+
+def test_resume_state_uses_the_carried_round_not_the_list_position():
+    """The second-resume bug, minimally: a run resumed at round 5 has round 5
+    at index 0. Position-as-round probes `round-000` under the round-5 job,
+    gets ArtifactNotFound, and reports "restart from scratch"."""
+    fake = FakeCoordinator({})
+    fake.uploaded["jobs/job-r5/round-005/weights.json"] = {
+        "w": {"shape": [1], "data": [5.0]}
+    }
+    next_round, weights, uri = resume_state(fake, [(5, "job-r5")])
+    assert next_round == 6
+    assert weights["w"]["data"] == [5.0]
+    assert uri == "artifact://jobs/job-r5/round-005/weights.json"
+
+
+def test_a_second_resume_does_not_silently_restart_from_scratch():
+    """Full two-crash sequence against the driver, not just resume_state.
+
+    Crash 1 after round 0 -> resume at round 1. Crash 2 after round 1 ->
+    the carried history is [(1, 'job-r1')], whose only entry is at index 0.
+    Position-as-round probes `jobs/job-r1/round-000/weights.json`, misses,
+    and returns (0, {}, None): training silently starts over, discarding
+    two completed rounds.
+    """
+    fake = FakeCoordinator({r: [(0, 1.0, 10), (1, 1.0, 10)] for r in range(4)})
+
+    first = run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                       worker_params=_params(),
+                       initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    assert first["job_ids"] == [(0, "job-r0")]
+
+    start, weights, uri = resume_state(fake, first["job_ids"])
+    assert start == 1
+
+    second = run_fedavg(fake, rounds=2, num_shards=2, min_participants=2,
+                        worker_params=_params(), start_round=start,
+                        weights_uri=uri, initial_weights=weights)
+    assert second["job_ids"] == [(1, "job-r1")]
+
+    start2, weights2, uri2 = resume_state(fake, second["job_ids"])
+    assert start2 == 2, "a second resume must not restart from round 0"
+    assert weights2["w"]["data"] == [pytest.approx(2.0)]
+    assert uri2 == "artifact://jobs/job-r1/round-001/weights.json"
+
+
+def test_prior_job_ids_are_carried_into_the_returned_history():
+    fake = FakeCoordinator({1: [(0, 1.0, 10), (1, 1.0, 10)]})
+    result = run_fedavg(fake, rounds=2, num_shards=2, min_participants=2,
+                        worker_params=_params(), start_round=1,
+                        prior_job_ids=[(0, "job-r0")],
+                        weights_uri="artifact://jobs/job-r0/round-000/weights.json",
+                        initial_weights={"w": {"shape": [1], "data": [5.0]}})
+    assert result["job_ids"] == [(0, "job-r0"), (1, "job-r1")]
+
+
+def test_resume_state_refuses_to_guess_when_the_history_is_incomplete():
+    """A resumed run whose rounds all failed carries only rounds >= 1. There
+    is no evidence about rounds 0..N-1 in that list, so "start from scratch"
+    is a guess that throws away completed work. Say so instead."""
+    fake = FakeCoordinator({})
+    with pytest.raises(RuntimeError, match="carried history starts at round 5"):
+        resume_state(fake, [(5, "job-r5"), (6, "job-r6")])
 
 
 def test_run_fedavg_resumes_from_start_round():

@@ -85,6 +85,45 @@ either registered node can claim either shard, so without the cap both
 nodes could sequentially serve all three before the driver's poll notices
 quorum.)
 
+## What counts as a participant, and what the driver refuses
+
+Everything a volunteer node produces — the delta, the sample count, the
+metrics file, the filenames — is attacker-controlled input. Result
+*verification* (catching a node that lies about a delta it honestly
+computed) is a later milestone, but input validation and containment are
+not deferred:
+
+- **A participant is an accepted commit, not an uploaded file.** The driver
+  counts only keys that exactly match the round's dispatched task set
+  (`jobs/{job_id}/shard-{i:03d}/metrics.json` for `i < num_shards`), and
+  cross-checks them against the tasks the coordinator reports `COMPLETED`
+  (`GET /v1alpha1/jobs/{id}/tasks`). Both halves are load-bearing: the agent
+  uploads a task's output tree recursively, so a nested `out/a/metrics.json`
+  would otherwise mint a second participant from one lease; and uploads
+  happen *before* the commit is offered, so an attempt the coordinator
+  rejected (lost lease, sha256 mismatch) would otherwise still be averaged
+  in.
+- **Sample counts must be positive.** Validating only the total is not
+  enough — `(delta=-999, n=-999)` plus `(delta=1.0, n=1000)` totals a
+  healthy 1 sample but yields a weight of `999001.0` where the honest step
+  is `1.0`. A sample-weighted mean is only a convex combination when every
+  count is positive.
+- **NaN and Inf are rejected, not averaged.** Python's `json` both emits and
+  parses `NaN`/`Infinity`, and NaN is absorbing: one non-finite value turns
+  every weight NaN, and every later round then trains from NaN while the run
+  still reports success. This one needs no attacker — a learning rate that
+  diverges on one shard does it. `fedavg_weights` fails closed on any
+  non-finite value entering the reduce or leaving `apply_delta`/`subtract`,
+  naming the parameter and index.
+- **`lease_seconds` is bounded** (`modea.MAX_LEASE_SECONDS`, one hour). A
+  lease deadline is the only thing that returns an abandoned task to the
+  queue, so `1e9` would pin a shard to a closed laptop for ~31 years and
+  `inf` overflows `timedelta` inside the coordinator's claim path.
+
+Known and deliberately still open: artifact `PUT` is neither authenticated
+nor lease-scoped, so the global model lives in a volunteer-writable
+namespace. That is fixed by the per-machine-token slice, not here.
+
 ## The `flashml.yaml` shape
 
 A federated-averaging round is submitted as an ordinary lease-mode job:
@@ -125,7 +164,11 @@ path and its `argv_capable` gate. A node only needs `module_capable`
 (fail-open — absent counts as capable) to be eligible. `run_fedavg` builds
 this JobSpec once per round and submits it as a new job
 (`flashml_workloads/fedavg_driver.py:_round_body`) — the round number is
-the only thing that changes between the driver's own resume points.
+the only thing that changes between the driver's own resume points. The
+image and isolation tier are `run_fedavg` parameters
+(`image=`, `isolation_tier=`); the defaults above are this repo's e2e
+fixture image, which only works because `SubprocessRunner` ignores `image`
+entirely — a docker-tier volunteer needs a real, pullable reference.
 
 ## What this proves — and what it does not
 

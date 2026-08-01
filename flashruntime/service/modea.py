@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,8 +57,48 @@ ALLOWED_TASK_MODULES = {
 }
 
 
+#: Longest lease a submitter may ask for. A lease deadline is the ONLY thing
+#: that returns an abandoned task to the queue, so an unbounded
+#: `lease_seconds` is a denial-of-service knob: `1e9` pins a task to a
+#: machine that closed its laptop for ~31 years, and `float("inf")` does not
+#: even survive the claim path (`timedelta(seconds=inf)` raises OverflowError
+#: *inside* the coordinator). One hour is far above any real task here and
+#: far below "forever".
+MAX_LEASE_SECONDS = 3600.0
+
+#: The worker params `_expand_fedavg` must forward. Single source of truth so
+#: the expansion and `flashml_workloads.fedavg_worker`'s reads cannot drift —
+#: `tests/test_service_fedavg.py` binds this tuple to the worker's actual
+#: parameter accesses by parsing its source.
+FEDAVG_WORKER_PARAM_KEYS = ("local_steps", "lr", "batch_size", "seed",
+                            "in_dim", "hidden", "out_dim", "dataset_size")
+
+#: Params `_expand_fedavg` computes itself per task, so the submitter does
+#: not supply them even though the worker reads them.
+FEDAVG_DRIVER_SUPPLIED_KEYS = ("round", "shard", "num_shards")
+
+
 class ExpansionError(ValueError):
     """The JobSpec cannot be expanded into tasks (bad workload/parameters)."""
+
+
+def _lease_seconds(params: dict, default: float) -> float:
+    """Validated, clamped `lease_seconds` from submitter-supplied params."""
+    raw = params.get("lease_seconds", default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ExpansionError(
+            f"lease_seconds must be a number, got {raw!r}"
+        ) from None
+    if not math.isfinite(value):
+        raise ExpansionError(
+            f"lease_seconds must be finite, got {raw!r} (a non-finite lease "
+            "deadline overflows timedelta in the claim path)"
+        )
+    if value <= 0:
+        raise ExpansionError(f"lease_seconds must be > 0, got {value}")
+    return min(value, MAX_LEASE_SECONDS)
 
 
 def expand_tasks(job_id: str, spec: JobSpec) -> list[TaskSpec]:
@@ -135,7 +176,7 @@ def expand_tasks(job_id: str, spec: JobSpec) -> list[TaskSpec]:
                 job_id=job_id,
                 commit_key=f"jobs/{job_id}/{task_id}/metrics.json",
                 max_attempts=spec.spec.retryPolicy.maxTaskAttempts,
-                lease_seconds=float(p.get("lease_seconds", 60.0)),
+                lease_seconds=_lease_seconds(p, 60.0),
                 payload=payload,
             )
         )
@@ -172,7 +213,7 @@ def _expand_kmeans(job_id: str, spec: JobSpec) -> list[TaskSpec]:
                 job_id=job_id,
                 commit_key=f"jobs/{job_id}/{task_id}/metrics.json",
                 max_attempts=spec.spec.retryPolicy.maxTaskAttempts,
-                lease_seconds=float(p.get("lease_seconds", 60.0)),
+                lease_seconds=_lease_seconds(p, 60.0),
                 payload={
                     "module": "flashml_workloads.kmeans_shard",
                     "params": {"centroids": centroids},
@@ -218,8 +259,7 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
     # missing key here would defer the failure to a KeyError inside a container
     # on a volunteer's machine, where it burns an attempt and reads as a node
     # fault rather than a bad submission. Fail at expansion instead.
-    worker_keys = ("local_steps", "lr", "batch_size", "seed",
-                   "in_dim", "hidden", "out_dim", "dataset_size")
+    worker_keys = FEDAVG_WORKER_PARAM_KEYS
     missing = [k for k in worker_keys if k not in p]
     if missing:
         raise ExpansionError(
@@ -238,7 +278,7 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
                 job_id=job_id,
                 commit_key=f"jobs/{job_id}/{task_id}/metrics.json",
                 max_attempts=spec.spec.retryPolicy.maxTaskAttempts,
-                lease_seconds=float(p.get("lease_seconds", 120.0)),
+                lease_seconds=_lease_seconds(p, 120.0),
                 payload={
                     "module": "flashml_workloads.fedavg_worker",
                     "params": params,

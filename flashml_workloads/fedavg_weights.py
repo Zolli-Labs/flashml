@@ -17,11 +17,13 @@ from __future__ import annotations
 import math
 
 __all__ = [
+    "NonFiniteWeights",
     "WeightShapeMismatch",
     "apply_delta",
     "decode",
     "encode",
     "reduce_deltas",
+    "require_finite",
     "subtract",
 ]
 
@@ -32,6 +34,41 @@ class WeightShapeMismatch(ValueError):
     Never coerce past this: averaging mismatched blobs would emit weights
     that load fine and train to nonsense.
     """
+
+
+class NonFiniteWeights(ValueError):
+    """A weight/delta blob contains NaN or +/-Infinity.
+
+    This is not a paranoid check, and it is not primarily about attackers:
+    Python's `json` module both EMITS and PARSES the non-standard `NaN`,
+    `Infinity` and `-Infinity` literals, so a single shard whose learning
+    rate diverged writes `NaN` into its delta, the reduce turns every
+    weight into `NaN`, every later round trains from `NaN` weights, and the
+    run still reports success. There is no recovering from it afterwards —
+    NaN is absorbing — so it has to fail at the boundary where it enters.
+    """
+
+
+def require_finite(blob: dict, where: str) -> dict:
+    """Raise `NonFiniteWeights` if any value in `blob` is NaN or Inf.
+
+    Named (not `_private`) because it is the containment boundary every
+    caller of this module is entitled to use; the message names the
+    parameter and the flat index so an operator can point at the shard that
+    diverged rather than bisecting a megabyte of JSON.
+    """
+    for name, param in blob.items():
+        for i, v in enumerate(param["data"]):
+            try:
+                finite = math.isfinite(v)
+            except TypeError:  # a node sent a string/null where a float belongs
+                finite = False
+            if not finite:
+                raise NonFiniteWeights(
+                    f"{where}: parameter {name!r} index {i} is not a finite "
+                    f"number ({v!r})"
+                )
+    return blob
 
 
 def encode(state: dict[str, tuple[list[int], list[float]]]) -> dict:
@@ -77,25 +114,28 @@ def _require_same_params(a: dict, b: dict) -> None:
 
 def subtract(new: dict, base: dict) -> dict:
     _require_same_params(new, base)
-    return {
+    # Checked on the RESULT, not the inputs: it is the cheapest single place
+    # that catches a diverged local step (NaN weights) before the delta is
+    # uploaded, and NaN/Inf in either input propagates into the difference.
+    return require_finite({
         name: {
             "shape": list(new[name]["shape"]),
             "data": [x - y for x, y in zip(new[name]["data"], base[name]["data"])],
         }
         for name in new
-    }
+    }, "subtract")
 
 
 def apply_delta(base: dict, delta: dict, scale: float = 1.0) -> dict:
     _require_same_params(base, delta)
-    return {
+    return require_finite({
         name: {
             "shape": list(base[name]["shape"]),
             "data": [b + scale * d
                      for b, d in zip(base[name]["data"], delta[name]["data"])],
         }
         for name in base
-    }
+    }, "apply_delta")
 
 
 def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
@@ -113,15 +153,35 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
     if total == 0:
         raise ValueError("reduce_deltas: zero total samples")
 
+    # Validating only the TOTAL is not enough, and the gap is a model-
+    # poisoning primitive rather than a hygiene nit. `samples` is chosen by
+    # an untrusted volunteer node. With contributions (delta=-999, n=-999)
+    # and (delta=1.0, n=1000) the total is a healthy 1, but the weights
+    # w = n/total are -999 and 1000, so the "average" of two updates of
+    # magnitude ~1 is 999001.0 — six orders of magnitude outside the convex
+    # hull the average is supposed to stay inside. A weight is only a convex
+    # combination when every count is positive, so reject non-positive
+    # counts outright. (Ordered AFTER the total guard so an all-zero
+    # contribution set still reports the clearer "zero total samples".)
+    for i, (_, n) in enumerate(contributions):
+        if n <= 0:
+            raise ValueError(
+                f"reduce_deltas: contribution {i} has non-positive sample "
+                f"count {n!r}; sample counts must be > 0 (a negative or zero "
+                "count makes the sample weight fall outside [0, 1] and lets "
+                "one shard amplify its delta arbitrarily)"
+            )
+
     first = contributions[0][0]
-    # Validate first blob's internal consistency and all subsequent blobs.
+    # Validate first blob's internal consistency and all subsequent blobs,
+    # and reject NaN/Inf on the way IN: one NaN anywhere in one shard's delta
+    # makes every output weight NaN, and every subsequent round then trains
+    # from NaN. Rejecting the round is recoverable; poisoning the model is not.
     for i, (blob, _) in enumerate(contributions):
-        if i == 0:
-            # Validate first blob against itself for internal consistency.
-            _require_same_params(first, blob)
-        else:
-            # Validate subsequent blobs against first.
-            _require_same_params(first, blob)
+        # i == 0 validates the first blob against itself (internal
+        # shape/data-length consistency), the rest against the first.
+        _require_same_params(first, blob)
+        require_finite(blob, f"reduce_deltas: contribution {i}")
 
     out: dict = {}
     for name in first:

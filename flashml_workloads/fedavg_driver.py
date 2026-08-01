@@ -25,18 +25,32 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Protocol, TypedDict
+from typing import Any, Callable, Protocol, Sequence, TypedDict
 
 from flashml_workloads.fedavg_weights import apply_delta, reduce_deltas
 
 _SAFE_DELTA_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-__all__ = ["ArtifactNotFound", "Coordinator", "HttpCoordinator", "QuorumNotMet",
-           "RoundResult", "resume_state", "run_fedavg"]
+#: Default container image for a round's tasks. Overridable per run — see
+#: `run_fedavg(image=...)`.
+DEFAULT_IMAGE = "local/tier1:dev"
+
+__all__ = ["ArtifactNotFound", "Coordinator", "CoordinatorUnavailable",
+           "DEFAULT_IMAGE", "HttpCoordinator", "QuorumNotMet", "RoundResult",
+           "resume_state", "run_fedavg"]
 
 
 class QuorumNotMet(RuntimeError):
     """A round's deadline passed with too few committed shards."""
+
+
+class CoordinatorUnavailable(RuntimeError):
+    """A poll-loop coordinator call kept failing after bounded retries.
+
+    Distinct from `QuorumNotMet`: the round did not run out of participants,
+    the driver ran out of coordinator. Bounded on purpose — retrying forever
+    would turn an outage into a run that never ends and never reports.
+    """
 
 
 class ArtifactNotFound(LookupError):
@@ -68,34 +82,85 @@ class Coordinator(Protocol):
     def get_artifact(self, key: str) -> Any: ...
     def put_artifact(self, key: str, body: Any) -> None: ...
 
+    # Optional. When present it is the authoritative participant count:
+    # artifacts prove only that *something was uploaded*, tasks prove that
+    # the coordinator ACCEPTED a commit. A Coordinator without it still
+    # works (the expected-key filter alone bounds the count at num_shards),
+    # so it is probed with getattr rather than being a hard requirement.
+    def tasks(self, job_id: str) -> list[dict]: ...
+
 
 def _round_body(round_idx: int, num_shards: int, worker_params: dict,
-                weights_uri: str | None, lease_seconds: float) -> dict:
+                weights_uri: str | None, lease_seconds: float,
+                image: str, isolation_tier: str, allow_fallback: bool) -> dict:
     params: dict[str, Any] = dict(worker_params)
     params.update({"round": round_idx, "num_shards": num_shards,
                    "lease_seconds": lease_seconds})
     if weights_uri is not None:
         params["weights"] = weights_uri
+    repository, _, tag = image.rpartition(":")
+    if not repository or not tag:
+        raise ValueError(
+            f"image must be 'repository:tag' with a pinned tag, got {image!r}"
+        )
     return {
         "apiVersion": "flashml.dev/v1alpha1", "kind": "Job",
         "metadata": {"name": f"fedavg-r{round_idx:03d}"},
         "spec": {
             "execution": {"backend": "leases"},
-            "image": {"repository": "local/tier1", "tag": "dev"},
+            "image": {"repository": repository, "tag": tag},
+            "isolation": {"tier": isolation_tier, "allowFallback": allow_fallback},
             "workload": {"type": "federated_averaging", "parameters": params},
         },
     }
 
 
-def _committed_metrics_keys(coord: Coordinator, job_id: str) -> list[str]:
+def _expected_metrics_keys(job_id: str, num_shards: int) -> dict[str, str]:
+    """`{artifact key: task_id}` for exactly the tasks this round dispatched.
+
+    Mirrors `service/modea._expand_fedavg`, which names task i `shard-{i:03d}`
+    and anchors its commit at `jobs/{job_id}/{task_id}/metrics.json`.
+    """
+    return {f"jobs/{job_id}/shard-{i:03d}/metrics.json": f"shard-{i:03d}"
+            for i in range(num_shards)}
+
+
+def _committed_metrics_keys(coord: Coordinator, job_id: str,
+                            num_shards: int) -> list[str]:
     """Keys of the round's committed metrics.json artifacts.
 
-    Cheap: one listing call. Kept separate from `_fetch` so the quorum poll
-    does not re-download every delta on every tick — deltas are megabytes,
-    and polling re-fetching them would dominate the round's transfer cost.
+    Two filters, because a participant count is a security boundary here —
+    it decides how much weight one machine gets in the average, and a
+    volunteer that mints extra "participants" both dilutes everyone else
+    and inflates its own share.
+
+    1. An EXACT match against the round's expected task set, never a
+       `endswith("metrics.json")` suffix test. The agent uploads a task's
+       whole output tree recursively, so a worker that writes
+       `out/a/metrics.json` and `out/b/metrics.json` would otherwise mint
+       two extra participants out of a single lease — and a key naming a
+       shard index beyond `num_shards` would mint one out of nothing.
+    2. Cross-checked against the coordinator's task states when the
+       Coordinator exposes them. Artifact PUTs happen BEFORE the commit is
+       offered, so an attempt the coordinator went on to REJECT (lost
+       lease, sha256 mismatch, attempts exhausted) still leaves its
+       metrics.json sitting in the bucket. Only a task the coordinator
+       reports COMPLETED had its commit accepted.
+
+    Cheap: one or two listing calls. Kept separate from `_fetch` so the
+    quorum poll does not re-download every delta on every tick — deltas are
+    megabytes, and polling re-fetching them would dominate the round's
+    transfer cost.
     """
-    return sorted(a["key"] for a in coord.artifacts(job_id)
-                  if a["key"].endswith("metrics.json"))
+    expected = _expected_metrics_keys(job_id, num_shards)
+    present = {a["key"] for a in coord.artifacts(job_id)} & expected.keys()
+
+    list_tasks = getattr(coord, "tasks", None)
+    if list_tasks is not None:
+        completed = {t["task_id"] for t in list_tasks(job_id)
+                     if t.get("state") == "COMPLETED"}
+        present = {k for k in present if expected[k] in completed}
+    return sorted(present)
 
 
 def _safe_delta_key(metrics_key: str, delta_file: str) -> str:
@@ -170,6 +235,17 @@ class HttpCoordinator:
         return self._request("GET", f"{self.base_url}/v1alpha1/jobs/{job_id_q}/artifacts",
                              headers=self.headers)
 
+    def tasks(self, job_id: str) -> list[dict]:
+        """`[{"task_id": ..., "state": "COMPLETED"|...}, ...]` for the job.
+
+        The coordinator's task view (`GET /v1alpha1/jobs/{id}/tasks`) is the
+        only place that knows whether a commit was ACCEPTED; the artifact
+        listing only knows something was uploaded.
+        """
+        job_id_q = urllib.parse.quote(job_id, safe="/")
+        return self._request("GET", f"{self.base_url}/v1alpha1/jobs/{job_id_q}/tasks",
+                             headers=self.headers)
+
     def get_artifact(self, key: str):
         key_q = urllib.parse.quote(key, safe="/")
         try:
@@ -186,14 +262,21 @@ class HttpCoordinator:
                       data=json.dumps(body).encode(), headers=self.headers)
 
 
-def resume_state(coord: Coordinator, job_ids: list[str]) -> tuple[int, dict, str | None]:
+def resume_state(coord: Coordinator,
+                 job_ids: Sequence[tuple[int, str]]) -> tuple[int, dict, str | None]:
     """Where to restart after a driver crash.
 
-    `job_ids[r]` is the job submitted for round r — they are appended in
-    order, so the round index and the list index are the same thing. Rounds
-    are idempotent: the weights artifact is written only AFTER a round
-    aggregates, so the newest one that exists names the last round that
-    fully completed.
+    `job_ids` is a sequence of `(round, job_id)` pairs — the round number is
+    CARRIED, never inferred from the list position. Position-as-round is
+    only true for a run that started at round 0: after resuming at round 5
+    the list holds round 5 at index 0, so a second crash would probe
+    `round-000` under the round-5 job, get `ArtifactNotFound`, and silently
+    restart training from scratch. The tuple removes the ambiguity rather
+    than documenting it.
+
+    Rounds are idempotent: the weights artifact is written only AFTER a
+    round aggregates, so the newest one that exists names the last round
+    that fully completed.
 
     Only ArtifactNotFound is swallowed. A transport error must propagate:
     silently treating an unreachable coordinator as "no rounds done" would
@@ -207,8 +290,18 @@ def resume_state(coord: Coordinator, job_ids: list[str]) -> tuple[int, dict, str
     (or worse, resume from stale weights further back). Surface it instead
     of guessing.
     """
-    for r in range(len(job_ids) - 1, -1, -1):
-        key = f"jobs/{job_ids[r]}/round-{r:03d}/weights.json"
+    pairs: list[tuple[int, str]] = []
+    for entry in job_ids:
+        if isinstance(entry, str) or len(entry) != 2:
+            raise TypeError(
+                "resume_state expects (round, job_id) pairs, got "
+                f"{entry!r}; a bare job-id list re-introduces the "
+                "position-is-the-round bug that breaks on a second resume"
+            )
+        pairs.append((int(entry[0]), str(entry[1])))
+
+    for r, job_id in sorted(pairs, reverse=True):
+        key = f"jobs/{job_id}/round-{r:03d}/weights.json"
         try:
             weights = coord.get_artifact(key)
         except ArtifactNotFound:
@@ -220,7 +313,45 @@ def resume_state(coord: Coordinator, job_ids: list[str]) -> tuple[int, dict, str
                 "never completed"
             )
         return r + 1, weights, f"artifact://{key}"
+
+    if pairs and min(r for r, _ in pairs) > 0:
+        # Every carried job is from a resumed run and none of them
+        # aggregated, so rounds before the earliest carried one may well
+        # have completed under jobs this list does not mention. "Start over
+        # from round 0" would throw that work away silently; say so instead.
+        raise RuntimeError(
+            "no completed round found, but the carried history starts at "
+            f"round {min(r for r, _ in pairs)}: earlier rounds ran under job "
+            "ids not present here, so 'restart from scratch' cannot be "
+            "concluded. Pass the full (round, job_id) history."
+        )
     return 0, {}, None
+
+
+def _retrying(call: Callable[[], Any], *, what: str, deadline: float,
+              attempts: int, backoff_s: float) -> Any:
+    """Call `call()`, retrying transient failures with capped backoff.
+
+    A multi-round run is hours long; one blip from the coordinator (a
+    restart, a dropped connection, a 502 from a proxy) must not end it —
+    flashnode's own executor loop backs off and keeps going, and a driver
+    that does not is the weakest link in the pair. Bounded, though: after
+    `attempts` tries it fails with context rather than looping forever, and
+    it never sleeps past the round deadline.
+    """
+    last: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001 - re-raised with context below
+            last = exc
+            remaining = deadline - time.monotonic()
+            if attempt == attempts or remaining <= 0:
+                break
+            time.sleep(min(backoff_s * (2 ** (attempt - 1)), 5.0, remaining))
+    raise CoordinatorUnavailable(
+        f"{what}: coordinator call failed after {attempt} attempt(s): {last!r}"
+    ) from last
 
 
 def run_fedavg(
@@ -237,31 +368,67 @@ def run_fedavg(
     on_round: Callable[[RoundResult], None] | None = None,
     start_round: int = 0,
     weights_uri: str | None = None,
+    image: str = DEFAULT_IMAGE,
+    isolation_tier: str = "standard",
+    allow_fallback: bool = False,
+    poll_attempts: int = 4,
+    poll_backoff_s: float = 0.5,
+    prior_job_ids: Sequence[tuple[int, str]] | None = None,
 ) -> dict:
+    """Drive `rounds` federated-averaging rounds and return the final weights.
+
+    `image` and `isolation_tier` are caller-settable rather than hardcoded:
+    the default `local/tier1:dev` exists only in this repo's e2e fixtures,
+    and it is inert today only because `SubprocessRunner` ignores `image`
+    entirely. The moment a round is served by a docker-tier volunteer, a
+    hardcoded image is an unpullable reference on somebody else's machine —
+    the same "two places, each correct in isolation" shape as the task-module
+    allowlist drift that already caused an outage here.
+
+    Returns `{"weights", "history", "job_ids"}` where `job_ids` is a list of
+    `(round, job_id)` pairs suitable for feeding straight back into
+    `resume_state` (and into `prior_job_ids` on the next resume).
+    """
     if min_participants < 1:
         raise ValueError("min_participants must be >= 1")
     if min_participants > num_shards:
         raise ValueError(
             f"min_participants {min_participants} exceeds num_shards {num_shards}"
         )
+    if poll_attempts < 1:
+        raise ValueError("poll_attempts must be >= 1")
 
     weights = initial_weights
     history: list[RoundResult] = []
-    job_ids: list[str] = []
+    # (round, job_id), never a bare list whose position implies the round:
+    # a resumed run's first entry is round `start_round`, not round 0.
+    job_ids: list[tuple[int, str]] = [(int(r), str(j))
+                                      for r, j in (prior_job_ids or [])]
 
     for r in range(start_round, rounds):
         job_id = coord.submit(
-            _round_body(r, num_shards, worker_params, weights_uri, lease_seconds)
+            _round_body(r, num_shards, worker_params, weights_uri,
+                        lease_seconds, image, isolation_tier, allow_fallback)
         )["job_id"]
-        job_ids.append(job_id)
+        job_ids.append((r, job_id))
 
         deadline = time.monotonic() + round_timeout_s
         keys: list[str] = []
         while True:
-            keys = _committed_metrics_keys(coord, job_id)
+            keys = _retrying(
+                lambda: _committed_metrics_keys(coord, job_id, num_shards),
+                what=f"round {r}: listing committed shards",
+                deadline=deadline, attempts=poll_attempts,
+                backoff_s=poll_backoff_s,
+            )
             if len(keys) >= min_participants:
                 break
-            state = coord.job_state(job_id)
+            state = _retrying(
+                lambda: coord.job_state(job_id),
+                what=f"round {r}: reading job state",
+                deadline=deadline, attempts=poll_attempts,
+                backoff_s=poll_backoff_s,
+            )
             if state in ("FAILED", "CANCELLED"):
                 raise QuorumNotMet(
                     f"round {r}: job {job_id} ended {state} with "
