@@ -15,6 +15,25 @@ _No unreleased changes yet._
 
 ### Added
 
+- **`run_fedavg(build_round=...)`**: a round no longer has to be the built-in
+  `federated_averaging` body. A caller supplies a `RoundPlan`
+  (`{"body", "task_ids"}`) per round, which is what lets *user code* be the
+  round worker — a repo entrypoint compiled to a `command` job per round —
+  instead of `flashml_workloads.fedavg_worker`. Everything downstream
+  (quorum, reduce, weights artifact, `resume_state`) is unchanged: none of
+  it depends on what ran inside the round, only on the task ids it produced
+  and the `metrics.json`/`delta.json` pair each one committed. `task_ids` is
+  carried rather than inferred because the committed-artifact filter is a
+  participant-count security boundary, and each recipe names its tasks
+  differently (`shard-000` vs `CommandRecipe`'s `task-000`).
+- **`run_fedavg(initial_weights={})`** is now defined rather than a
+  `WeightShapeMismatch`: it means the driver holds no weights yet, so round
+  0's reduced contribution *is* the first set of weights. That is the only
+  reading consistent with the worker contract ("`delta.json` is the change
+  from the weights you were given") when a worker was given none, and it is
+  what makes a driver that has never seen the user's model — one running
+  inside a service with no torch — able to start a run at all. Passing real
+  `initial_weights` behaves exactly as before.
 - **`NodeRegistration.module_capable`** (default `True`): advertises whether
   a node can run "module" (`python -m <allowlisted module>`) tasks,
   independent of `argv_capable`. `IsolationAwarePlacement` now refuses to

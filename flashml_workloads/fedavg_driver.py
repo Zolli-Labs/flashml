@@ -39,9 +39,10 @@ _SAFE_DELTA_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: `run_fedavg(image=...)`.
 DEFAULT_IMAGE = "local/tier1:dev"
 
-__all__ = ["ArtifactNotFound", "Coordinator", "CoordinatorUnavailable",
-           "DEFAULT_IMAGE", "HttpCoordinator", "QuorumNotMet", "RoundResult",
-           "resume_state", "run_fedavg"]
+__all__ = ["ArtifactNotFound", "BuildRound", "Coordinator",
+           "CoordinatorUnavailable", "DEFAULT_IMAGE", "HttpCoordinator",
+           "QuorumNotMet", "RoundPlan", "RoundResult", "resume_state",
+           "run_fedavg"]
 
 
 class QuorumNotMet(RuntimeError):
@@ -71,6 +72,31 @@ class RoundResult(TypedDict):
     participants: int
     mean_loss: float
     job_id: str
+
+
+class RoundPlan(TypedDict):
+    """What one round is: the job body to submit, and the task ids it will
+    produce.
+
+    ``task_ids`` is carried rather than derived because the two things the
+    driver needs from a round — "submit this" and "look for these commits" —
+    are decided by whoever built the body. The built-in body expands via
+    ``service/modea._expand_fedavg`` (``shard-000``, ``shard-001``, …); a
+    caller compiling the round as a ``command`` workload gets
+    ``CommandRecipe``'s ``task-000``, ``task-001``, … instead. Inferring the
+    prefix from the workload type would be a second place that has to know
+    every recipe's naming rule, and the artifact key filter is a security
+    boundary here (see ``_committed_metrics_keys``) — so it is stated, not
+    guessed.
+    """
+
+    body: dict
+    task_ids: list[str]
+
+
+#: Build the ``RoundPlan`` for round ``r`` given the round's weights URI
+#: (``None`` on round 0, when nothing has been aggregated yet).
+BuildRound = Callable[[int, "str | None"], RoundPlan]
 
 
 class Coordinator(Protocol):
@@ -119,18 +145,24 @@ def _round_body(round_idx: int, num_shards: int, worker_params: dict,
     }
 
 
-def _expected_metrics_keys(job_id: str, num_shards: int) -> dict[str, str]:
+def _default_task_ids(num_shards: int) -> list[str]:
+    """Task ids `service/modea._expand_fedavg` produces for a round."""
+    return [f"shard-{i:03d}" for i in range(num_shards)]
+
+
+def _expected_metrics_keys(job_id: str, task_ids: Sequence[str]) -> dict[str, str]:
     """`{artifact key: task_id}` for exactly the tasks this round dispatched.
 
-    Mirrors `service/modea._expand_fedavg`, which names task i `shard-{i:03d}`
-    and anchors its commit at `jobs/{job_id}/{task_id}/metrics.json`.
+    Every expansion anchors a task's commit at
+    `jobs/{job_id}/{task_id}/metrics.json`; which task ids exist is the
+    round's `RoundPlan.task_ids`.
     """
-    return {f"jobs/{job_id}/shard-{i:03d}/metrics.json": f"shard-{i:03d}"
-            for i in range(num_shards)}
+    return {f"jobs/{job_id}/{task_id}/metrics.json": task_id
+            for task_id in task_ids}
 
 
 def _committed_metrics_keys(coord: Coordinator, job_id: str,
-                            num_shards: int) -> list[str]:
+                            task_ids: Sequence[str]) -> list[str]:
     """Keys of the round's committed metrics.json artifacts.
 
     Two filters, because a participant count is a security boundary here —
@@ -143,7 +175,7 @@ def _committed_metrics_keys(coord: Coordinator, job_id: str,
        whole output tree recursively, so a worker that writes
        `out/a/metrics.json` and `out/b/metrics.json` would otherwise mint
        two extra participants out of a single lease — and a key naming a
-       shard index beyond `num_shards` would mint one out of nothing.
+       task id outside the round's own set would mint one out of nothing.
     2. Cross-checked against the coordinator's task states when the
        Coordinator exposes them. Artifact PUTs happen BEFORE the commit is
        offered, so an attempt the coordinator went on to REJECT (lost
@@ -156,7 +188,7 @@ def _committed_metrics_keys(coord: Coordinator, job_id: str,
     megabytes, and polling re-fetching them would dominate the round's
     transfer cost.
     """
-    expected = _expected_metrics_keys(job_id, num_shards)
+    expected = _expected_metrics_keys(job_id, task_ids)
     present = {a["key"] for a in coord.artifacts(job_id)} & expected.keys()
 
     list_tasks = getattr(coord, "tasks", None)
@@ -384,6 +416,7 @@ def run_fedavg(
     poll_attempts: int = 4,
     poll_backoff_s: float = 0.5,
     prior_job_ids: Sequence[tuple[int, str]] | None = None,
+    build_round: BuildRound | None = None,
 ) -> dict:
     """Drive `rounds` federated-averaging rounds and return the final weights.
 
@@ -394,6 +427,30 @@ def run_fedavg(
     hardcoded image is an unpullable reference on somebody else's machine —
     the same "two places, each correct in isolation" shape as the task-module
     allowlist drift that already caused an outage here.
+
+    `build_round` replaces how a round becomes a job. The default builds the
+    built-in `federated_averaging` body, whose tasks run
+    `flashml_workloads.fedavg_worker`. A caller that wants the *user's own*
+    code to be the round worker — the cloud API compiling a repo's
+    entrypoint into a `command` job per round — passes its own builder
+    instead; everything downstream (quorum, reduce, weights artifact,
+    resume) is unchanged, because none of it depends on what ran inside the
+    round, only on the task ids it produced and the `metrics.json` /
+    `delta.json` pair each one committed. `worker_params`, `image`,
+    `isolation_tier`, `allow_fallback` and `lease_seconds` are inputs to the
+    *default* builder and are ignored when `build_round` is supplied — the
+    builder already knows all of it.
+
+    `initial_weights` may be `{}`, and that is not the same as "start from
+    zeros": it means the driver holds no weights yet, so round 0's reduced
+    contribution IS the first set of weights rather than a delta applied to
+    something. That is the only reading consistent with the worker contract
+    ("`delta.json` is the change from the weights you were given") when a
+    worker was given no weights — and it is the case that matters for
+    arbitrary user code, where the API cannot construct the model to
+    initialise from. Passing a real `initial_weights` (as
+    `fedavg_worker`-based callers do, seeding from the model) keeps the
+    previous behaviour exactly.
 
     Returns `{"weights", "history", "job_ids"}` where `job_ids` is a list of
     `(round, job_id)` pairs suitable for feeding straight back into
@@ -416,17 +473,37 @@ def run_fedavg(
                                       for r, j in (prior_job_ids or [])]
 
     for r in range(start_round, rounds):
-        job_id = coord.submit(
-            _round_body(r, num_shards, worker_params, weights_uri,
-                        lease_seconds, image, isolation_tier, allow_fallback)
-        )["job_id"]
+        if build_round is None:
+            plan: RoundPlan = {
+                "body": _round_body(r, num_shards, worker_params, weights_uri,
+                                    lease_seconds, image, isolation_tier,
+                                    allow_fallback),
+                "task_ids": _default_task_ids(num_shards),
+            }
+        else:
+            plan = build_round(r, weights_uri)
+        task_ids = list(plan["task_ids"])
+        if len(task_ids) != len(set(task_ids)):
+            # Duplicate ids would collapse two expected keys into one and
+            # silently lower the achievable participant count below
+            # min_participants — a round that can never reach quorum.
+            raise ValueError(
+                f"round {r}: build_round returned duplicate task ids {task_ids!r}"
+            )
+        if len(task_ids) < min_participants:
+            raise ValueError(
+                f"round {r}: build_round returned {len(task_ids)} task(s), "
+                f"fewer than min_participants {min_participants} — quorum "
+                "could never be reached"
+            )
+        job_id = coord.submit(plan["body"])["job_id"]
         job_ids.append((r, job_id))
 
         deadline = time.monotonic() + round_timeout_s
         keys: list[str] = []
         while True:
             keys = _retrying(
-                lambda: _committed_metrics_keys(coord, job_id, num_shards),
+                lambda: _committed_metrics_keys(coord, job_id, task_ids),
                 what=f"round {r}: listing committed shards",
                 deadline=deadline, attempts=poll_attempts,
                 backoff_s=poll_backoff_s,
@@ -447,7 +524,7 @@ def run_fedavg(
             if time.monotonic() > deadline:
                 raise QuorumNotMet(
                     f"round {r}: timed out with {len(keys)} of "
-                    f"{min_participants} needed ({num_shards} shards dispatched)"
+                    f"{min_participants} needed ({len(task_ids)} shards dispatched)"
                 )
             # Clamp to the time remaining: if round_timeout_s < poll_seconds
             # a full un-clamped sleep would overrun the deadline by up to
@@ -459,7 +536,16 @@ def run_fedavg(
         # construction: we never re-read this job after aggregating.
         collected = _fetch(coord, keys)
         reduced = reduce_deltas([(d, n) for d, n, _ in collected])
-        weights = apply_delta(weights, reduced)
+        # No weights yet (`initial_weights={}` and nothing aggregated): the
+        # round's workers were handed nothing, so what they reported as
+        # "the change from what you were given" is the weights themselves.
+        # `apply_delta` would refuse here — an empty base and a populated
+        # delta are, correctly, not the same parameter set.
+        # `require_finite` on the bootstrap branch because `apply_delta` —
+        # the only other way out of here — checks its own result, and the
+        # weighted sum of finite contributions can still overflow to inf.
+        weights = (require_finite(reduced, f"round {r}: bootstrap weights")
+                   if not weights else apply_delta(weights, reduced))
 
         weights_key = f"jobs/{job_id}/round-{r:03d}/weights.json"
         coord.put_artifact(weights_key, weights)

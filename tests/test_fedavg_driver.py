@@ -720,3 +720,136 @@ def test_run_fedavg_resumes_from_start_round():
     # initial model while these two assertions kept passing.
     params = fake.submitted[0][1]["spec"]["workload"]["parameters"]
     assert params["weights"] == "artifact://jobs/job-r0/round-000/weights.json"
+
+
+# ---------------------------------------------------------------------------
+# build_round: the round body is the caller's, so the *user's own* code can be
+# the round worker (the cloud API compiles a repo entrypoint into a `command`
+# job per round). Everything downstream must be indifferent to what ran.
+# ---------------------------------------------------------------------------
+
+
+class CommandShapedCoordinator(FakeCoordinator):
+    """A fake whose tasks are named `task-NNN`, as `CommandRecipe` names them.
+
+    The default expansion names them `shard-NNN`; a driver that hardcoded
+    either prefix would find no committed shard here (or there) and time out
+    on quorum, which is exactly the regression this class exists to catch.
+    """
+
+    def artifacts(self, job_id):
+        self.artifacts_calls += 1
+        r = int(job_id.split("r")[1])
+        out = []
+        for entry in self.commits.get(r, []):
+            out.append({"key": f"jobs/{job_id}/task-{entry[0]:03d}/metrics.json"})
+            out.append({"key": f"jobs/{job_id}/task-{entry[0]:03d}/delta.json"})
+        return out
+
+    def tasks(self, job_id):
+        r = int(job_id.split("r")[1])
+        return [{"task_id": f"task-{e[0]:03d}", "state": "COMPLETED"}
+                for e in self.commits.get(r, [])]
+
+    def get_artifact(self, key):
+        return super().get_artifact(key.replace("/task-", "/shard-"))
+
+    def submit(self, body):
+        self._round = body["spec"]["workload"]["parameters"]["round_index"]
+        job_id = f"job-r{self._round}"
+        self.submitted.append((job_id, body))
+        return {"job_id": job_id}
+
+
+def _command_plan(num_shards):
+    def build(round_idx, weights_uri):
+        inputs = {"code": "artifact://uploads/abc/code.tar.gz"}
+        if weights_uri is not None:
+            inputs["weights"] = weights_uri
+        return {
+            "body": {
+                "apiVersion": "flashml.dev/v1alpha1", "kind": "Job",
+                "metadata": {"name": f"repo-r{round_idx:03d}"},
+                "spec": {"workload": {"type": "command", "parameters": {
+                    "round_index": round_idx, "inputs": inputs}}},
+            },
+            "task_ids": [f"task-{i:03d}" for i in range(num_shards)],
+        }
+    return build
+
+
+def test_build_round_lets_the_caller_own_the_round_body_and_task_ids():
+    fake = CommandShapedCoordinator({r: [(0, 1.0, 10), (1, 1.0, 10)]
+                                     for r in range(2)})
+    result = run_fedavg(fake, rounds=2, num_shards=2, min_participants=2,
+                        worker_params=_params(),
+                        initial_weights={"w": {"shape": [1], "data": [0.0]}},
+                        build_round=_command_plan(2))
+    assert [h["round"] for h in result["history"]] == [0, 1]
+    assert result["weights"]["w"]["data"] == [pytest.approx(2.0)]
+    # The submitted bodies are the caller's, verbatim — no fedavg body leaked.
+    assert [b["spec"]["workload"]["type"] for _, b in fake.submitted] == \
+        ["command", "command"]
+
+
+def test_build_round_receives_the_previous_rounds_weights_uri():
+    seen = []
+    inner = _command_plan(2)
+
+    def build(round_idx, weights_uri):
+        seen.append((round_idx, weights_uri))
+        return inner(round_idx, weights_uri)
+
+    fake = CommandShapedCoordinator({r: [(0, 1.0, 10), (1, 1.0, 10)]
+                                     for r in range(2)})
+    run_fedavg(fake, rounds=2, num_shards=2, min_participants=2,
+               worker_params=_params(),
+               initial_weights={"w": {"shape": [1], "data": [0.0]}},
+               build_round=build)
+    assert seen[0] == (0, None)
+    assert seen[1] == (1, "artifact://jobs/job-r0/round-000/weights.json")
+
+
+def test_empty_initial_weights_bootstraps_from_round_zero():
+    """No initial weights: round 0's reduced contribution IS the weights.
+
+    The cloud API cannot construct a user's model to initialise from — it
+    holds no torch and has never seen their code — so `initial_weights={}`
+    has to mean something. `apply_delta` refuses an empty base (correctly:
+    the parameter sets differ), so without this the first round of every
+    repo-driven federated job would die on a WeightShapeMismatch.
+    """
+    fake = CommandShapedCoordinator({0: [(0, 2.0, 10), (1, 4.0, 10)]})
+    result = run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                        worker_params=_params(), initial_weights={},
+                        build_round=_command_plan(2))
+    # Sample-weighted mean of 2.0 and 4.0, taken as the weights themselves.
+    assert result["weights"]["w"]["data"] == [pytest.approx(3.0)]
+
+
+def test_build_round_returning_too_few_tasks_is_refused_before_submitting():
+    fake = CommandShapedCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+    with pytest.raises(ValueError, match="fewer than min_participants"):
+        run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                   worker_params=_params(),
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}},
+                   build_round=_command_plan(1))
+    assert fake.submitted == []
+
+
+def test_build_round_returning_duplicate_task_ids_is_refused():
+    """Duplicates collapse in the expected-key set, so a round that looks
+    like it dispatched N tasks could only ever reach quorum with fewer."""
+    fake = CommandShapedCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+
+    def build(round_idx, weights_uri):
+        plan = _command_plan(2)(round_idx, weights_uri)
+        plan["task_ids"] = ["task-000", "task-000"]
+        return plan
+
+    with pytest.raises(ValueError, match="duplicate task ids"):
+        run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+                   worker_params=_params(),
+                   initial_weights={"w": {"shape": [1], "data": [0.0]}},
+                   build_round=build)
+    assert fake.submitted == []
