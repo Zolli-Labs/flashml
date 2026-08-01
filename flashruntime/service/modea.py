@@ -398,6 +398,75 @@ def _authenticated_node(state, token: str | None) -> str:
     return node_id
 
 
+#: An operator may name the machine it is forwarding for. Honoured ONLY from
+#: an operator credential — see `_write_identity`.
+DELEGATION_HEADER = "X-FlashML-On-Behalf-Of"
+
+
+def _delegated_node(request: Request) -> str | None:
+    """The node named by the delegation header, or None if absent.
+
+    Never call this for a non-operator caller: for anyone else the header is
+    not authoritative, so it must not be parsed either — a volunteer that
+    cannot be believed also cannot be allowed to turn its own writes into
+    400s, and probing the delegation path should tell it nothing.
+    """
+    values = request.headers.getlist(DELEGATION_HEADER)
+    if not values:
+        return None
+    if len(values) > 1:
+        # Two values means somebody appended one. The API forwarding an
+        # agent's request would produce exactly that if it failed to strip
+        # the agent's copy, and Starlette would hand us the *first* — an
+        # ordering the agent controls. Refuse rather than pick a winner.
+        raise HTTPException(
+            status_code=400,
+            detail=f"ambiguous {DELEGATION_HEADER}: {len(values)} values",
+        )
+    # An empty value is deliberately returned as "" rather than None: it is a
+    # header that was sent, and `_write_identity` fails it closed. Folding it
+    # into None would let an API bug that emits a blank header silently
+    # restore unscoped operator reach.
+    return values[0].strip()
+
+
+def _write_identity(state, request: Request) -> str | None:
+    """Whose live leases confine this write? A node_id, or None for an
+    unscoped operator. 401 if the caller is neither.
+
+    THE single place delegation is decided, deliberately shared by both
+    authorize helpers below. Artifacts key writes by prefix and checkpoints
+    key them by the (job, task) pair; if each resolved the caller for itself,
+    the two would drift and the drift would be a silent hole — this repo has
+    been bitten by exactly that seam twice.
+
+    Delegation can only ever *narrow*. An operator with no header keeps the
+    unscoped driver reach it has always had; the moment it asserts an
+    identity it is authorized precisely as that node would have been, so a
+    driver speaking for node-a loses its own `jobs/{job}/round-NNN/` keys.
+    """
+    token = _bearer(request)
+    if _is_operator(state, token):
+        delegated = _delegated_node(request)
+        if delegated is None:
+            return None  # unscoped driver — the pre-delegation behaviour
+        if not delegated:
+            raise HTTPException(
+                status_code=403, detail=f"empty {DELEGATION_HEADER}"
+            )
+        # NOT checked against the node registry. Liveness of a lease is the
+        # only authority that matters, and it is strictly stronger: a node
+        # can only hold one by having registered and claimed. Consulting the
+        # in-memory registry too would add a second source of truth about
+        # identity that a coordinator restart empties while durable leases
+        # survive — refusing writes the lease table still authorizes.
+        return delegated
+    # Any other caller: the header is ignored entirely. Not an error — it is
+    # simply not authoritative, and a volunteer must never act as another
+    # machine.
+    return _authenticated_node(state, token)
+
+
 def _authorize_write(state, manager, request: Request, key: str) -> None:
     """Confine a write to the tasks this caller currently holds.
 
@@ -410,13 +479,14 @@ def _authorize_write(state, manager, request: Request, key: str) -> None:
     runs inside the trusted API, holds no lease, and must still write
     `jobs/{job}/round-NNN/weights.json`. That is a second credential class,
     not an exemption — the caller is still authenticated and attributable.
+    An operator forwarding for a machine names it in `DELEGATION_HEADER` and
+    gets that machine's scope instead.
     """
     if not state.authenticator.enforcing:
         return
-    token = _bearer(request)
-    if _is_operator(state, token):
+    node_id = _write_identity(state, request)
+    if node_id is None:
         return
-    node_id = _authenticated_node(state, token)
     # Trailing slash is load-bearing: without it `jobs/j/trial-000extra/...`
     # would satisfy a `jobs/j/trial-000` prefix test.
     allowed = [f"jobs/{job}/{task}/" for job, task in manager.live_leases_for_node(node_id)]
@@ -429,13 +499,16 @@ def _authorize_write(state, manager, request: Request, key: str) -> None:
 
 def authorize_task_write(state, manager, request: Request, job_id: str, task_id: str) -> None:
     """Checkpoint routes name (job, task) in the path, so authorize the pair
-    directly instead of reconstructing a key prefix."""
+    directly instead of reconstructing a key prefix.
+
+    Same caller resolution as `_authorize_write` — including delegation —
+    because it is the same question asked about a differently-shaped key.
+    """
     if not state.authenticator.enforcing:
         return
-    token = _bearer(request)
-    if _is_operator(state, token):
+    node_id = _write_identity(state, request)
+    if node_id is None:
         return
-    node_id = _authenticated_node(state, token)
     if (job_id, task_id) not in manager.live_leases_for_node(node_id):
         raise HTTPException(
             status_code=403,
