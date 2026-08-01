@@ -14,7 +14,7 @@ import os
 import re
 import sys
 import uuid
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 CONTAINER_WORKDIR = "/work"
 
@@ -77,6 +77,41 @@ def _user_flag() -> list[str]:
     )
 
 
+def _bind_mount_source(workdir: Path) -> str:
+    """Render `workdir` as the source half of `-v src:dst`, in a form
+    Docker's flag parser won't misinterpret.
+
+    `-v` splits its argument on ':'. A POSIX path never contains one, so it
+    passes through byte-identical (this must not change — see the plan's
+    Global Constraints). A Windows path (`C:\\Users\\phong\\...`) contains
+    both backslashes AND a drive-letter colon, which is ambiguous with the
+    src:dst separator itself — that raw form is what breaks the split.
+
+    Detecting "is this a Windows path" by `isinstance(..., PureWindowsPath)`
+    rather than `sys.platform == "win32"` is deliberate: a real `Path`
+    passed in while running on Windows already IS a `WindowsPath`, a
+    `PureWindowsPath` subclass, so the same branch handles the live case
+    and lets tests exercise it on any host with a synthetic
+    `PureWindowsPath` — no `sys.platform` gate to bit-rot in CI.
+
+    Rewrites `C:\\Users\\phong\\work` to `/c/Users/phong/work`: lowercase
+    drive letter, forward slashes, exactly one ':' left in the whole
+    argument (the src:dst separator). This is the form Docker Desktop's
+    Windows CLI accepts for bind-mount sources.
+    """
+    if isinstance(workdir, PureWindowsPath):
+        drive = workdir.drive  # e.g. "C:" — empty for a driveless path
+        if not drive:
+            raise ValueError(
+                f"Windows workdir {workdir!r} has no drive letter — cannot "
+                "build a Docker Desktop bind-mount source from it"
+            )
+        letter = drive.rstrip(":").lower()
+        rest = "/".join(workdir.parts[1:])
+        return f"/{letter}/{rest}" if rest else f"/{letter}"
+    return str(workdir)
+
+
 def harden_args(
     workdir: Path,
     *,
@@ -101,6 +136,6 @@ def harden_args(
         "--memory", f"{memory_gb}g",
         "--memory-swap", f"{memory_gb}g",
         "--ulimit", "nofile=1024:1024",
-        "-v", f"{workdir}:{CONTAINER_WORKDIR}",
+        "-v", f"{_bind_mount_source(workdir)}:{CONTAINER_WORKDIR}",
         "-w", CONTAINER_WORKDIR,
     ]
