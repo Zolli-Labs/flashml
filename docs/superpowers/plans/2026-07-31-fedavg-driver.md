@@ -1824,6 +1824,23 @@ Expected: FAIL — the coordinator rejects `federated_averaging` or the driver c
 
 - [ ] **Step 3: Make it pass, then write the demo script and guide**
 
+**Placement preconditions — verified before this task was written, so do not
+re-derive them if a task never gets leased:**
+
+- `IsolationSpec.tier` defaults to `"standard"` (`protocol/v1alpha1.py:97`), and
+  `IsolationAwarePlacement` lets `"standard"` "run anywhere". The test agent
+  registering with `sandbox_capable: False` is therefore eligible. Do NOT set
+  `isolation.tier: "sandboxed"` in the round JobSpec — that would fail closed
+  against this agent and the job would sit PENDING until the round deadline.
+- The `module_capable` gate is fail-OPEN (`is False` excludes; absent counts as
+  capable), so registering it `True` is belt-and-braces, not required.
+- `argv_capable` is irrelevant here: these are `module` payloads, not `argv`.
+
+If a lease never arrives, check the coordinator's `/v1alpha1/jobs/{id}` state
+and events first — a silent 204 from `/leases/claim` means either the queue is
+empty or nothing is eligible for this node, and the endpoint does not
+distinguish them (a known gap recorded in the 2026-07-29 deferred list).
+
 Debug against the real coordinator until both tests pass. Expect to iterate
 here — this is the first time the pieces meet. Known traps:
 
