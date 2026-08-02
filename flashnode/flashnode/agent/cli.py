@@ -202,10 +202,27 @@ def _work(args: list[str]) -> int:
         # (subprocess.run(["docker", ...])); if it isn't installed that call
         # raises FileNotFoundError deep inside a task attempt. Check for it
         # here, at startup, rather than let the agent die on the first task.
-        if shutil.which("docker") is None:
+        # A `docker` binary on PATH says nothing about the daemon behind it,
+        # the credential helper Docker consults when it pulls, or whether
+        # this machine's work directory is even visible inside the VM. Both
+        # hosts that stopped the 2026-08-02 §10 run-through passed the old
+        # `shutil.which` check and then failed every task they claimed —
+        # docker_runner raises TaskExecutionError, loop.py calls fail() and
+        # claims the next one, forever, silently.
+        #
+        # pull=False deliberately: an agent is a long-running daemon on
+        # someone else's machine, and a transient registry blip must not
+        # stop one whose images are already cached. `flashnode doctor` does
+        # the pull.
+        from flashnode.doctor import format_results, run_checks
+
+        results = run_checks(pull=False)
+        if any(r.status != "ok" for r in results):
             print(
-                f"flashnode work: --runner {opts.runner} requires the `docker` CLI "
-                "on PATH — refusing to start without it",
+                f"flashnode work: this machine cannot run tasks with "
+                f"--runner {opts.runner}.\n" + format_results(results)
+                + "\n\nRun `flashnode doctor` for the full check, including "
+                  "the image pull this skipped.",
                 file=sys.stderr,
             )
             return 2

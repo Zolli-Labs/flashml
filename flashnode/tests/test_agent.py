@@ -117,24 +117,23 @@ def test_work_cli_sets_module_capable_from_runner_choice(
     monkeypatch.setenv("FLASHNODE_ALLOWED_IMAGES", "img:1")
     monkeypatch.setenv("FLASHNODE_STATE_DIR", str(tmp_path))
 
-    # --runner docker and --runner argv both refuse to start when the `docker`
-    # CLI is absent (cli.py: `shutil.which("docker") is None` -> return 2).
-    # That guard is correct and has its own test; here it is environment noise
-    # standing between us and the behaviour under test, which is purely how
+    # --runner docker and --runner argv both refuse to start on a host that
+    # cannot run tasks — `flashnode work` now runs the doctor's checks as a
+    # fail-closed gate (flashnode/doctor.py) instead of the old
+    # `shutil.which("docker") is None`. That gate is correct and has its own
+    # tests in test_work_gate.py; here it is environment noise standing
+    # between us and the behaviour under test, which is purely how
     # module_capable is derived from the runner choice.
     #
-    # Pretend docker is present. Without this the test passes on any developer
-    # machine with Docker installed and fails on a runner without one — which
-    # is exactly what happened the first time flashnode ran in CI on macOS
-    # (GitHub's macOS runners ship no Docker daemon).
+    # Report a healthy host. Without this the test passes on a developer
+    # machine with Docker AND the probe image cached, and fails everywhere
+    # else — which is the shape of the bug that first hit flashnode in CI on
+    # macOS (GitHub's macOS runners ship no Docker daemon).
     #
-    # Patch `shutil.which` on the real module, NOT `cli.shutil`: cli.py imports
-    # shutil INSIDE the function (cli.py:157), so there is no module-level
-    # attribute to replace — the local name resolves to the shared module
-    # object from sys.modules, which is what this patches.
-    import shutil
-
-    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    # Stubbing run_checks rather than `shutil.which` because `which` is now
+    # only the first of six checks; faking it alone lets the gate proceed to
+    # `docker version` and a real `docker run`.
+    monkeypatch.setattr("flashnode.doctor.run_checks", lambda **kw: [])
 
     captured = {}
     real_discover = capabilities_mod.discover
