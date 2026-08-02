@@ -20,11 +20,16 @@ nobody can keep correct.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
+
+from flashnode.executor.hardening import CONTAINER_WORKDIR, _bind_mount_source
 
 __all__ = [
     "PROBE_IMAGE",
@@ -32,6 +37,8 @@ __all__ = [
     "check_cli_on_path",
     "check_engine",
     "check_pull",
+    "check_workdir_mount",
+    "default_workdir",
     "doctor_main",
     "exit_code",
     "format_results",
@@ -156,6 +163,79 @@ def check_pull(run: CommandRunner, image: str = PROBE_IMAGE) -> CheckResult:
     return CheckResult(name, "fail", detail=f"{image}\n{err}", fix=fix)
 
 
+PROBE_FILENAME = "flashnode-doctor-probe.txt"
+PROBE_CONTENT = "flashnode-doctor"
+
+
+def default_workdir() -> Path:
+    """Where the agent will actually stage task inputs.
+
+    Mirrors ExecutorLoop's own default (`workdir_base=None` → the system
+    temp dir) deliberately. On macOS that is /var/folders/…, which colima
+    cannot see — so the doctor fails on precisely the machines where the
+    agent would, which is the entire point.
+    """
+    return Path(os.environ.get("FLASHNODE_WORKDIR") or tempfile.gettempdir())
+
+
+def _mount_failure_fix(err: str) -> str:
+    if "No such image" in err or "not found" in err.lower():
+        return ("The probe image is not cached on this machine. Run "
+                "`flashnode doctor` once — it pulls it.")
+    return ("The container could not see this directory. On macOS, "
+            "colima and Docker Desktop share only $HOME: set "
+            "FLASHNODE_WORKDIR to a path under your home directory "
+            "(e.g. export FLASHNODE_WORKDIR=$HOME/.flashnode/work) and "
+            "re-run `flashnode doctor`.")
+
+
+def check_workdir_mount(
+    run: CommandRunner, workdir: Path, image: str = PROBE_IMAGE
+) -> CheckResult:
+    """Can a container see the directory the agent stages inputs in?
+
+    Minimum viable flags, on purpose. Check 5 runs the same probe with the
+    full hardening set, so a failure HERE is a mount problem and a failure
+    THERE is a flag problem — localised without pattern-matching stderr.
+
+    The container READS a file the host wrote rather than writing one: the
+    curated images end in a non-root USER and this flag set has no --user,
+    so a write would hit permission denied on a healthy Linux host.
+    """
+    name = "workdir bind-mounts"
+    probe = Path(workdir) / PROBE_FILENAME
+    try:
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        probe.write_text(PROBE_CONTENT)
+    except OSError as exc:
+        return CheckResult(
+            name, "fail", detail=f"{workdir}: {exc}",
+            fix="The agent cannot write to its own work directory. Set "
+                "FLASHNODE_WORKDIR to a writable path and re-run "
+                "`flashnode doctor`.",
+        )
+    argv = [
+        "docker", "run", "--rm", "--pull=never",
+        "-v", f"{_bind_mount_source(Path(workdir))}:{CONTAINER_WORKDIR}",
+        "-w", CONTAINER_WORKDIR,
+        image,
+        "python", "-c",
+        f"print(open('{CONTAINER_WORKDIR}/{PROBE_FILENAME}').read(), end='')",
+    ]
+    try:
+        proc = run(argv, timeout=120.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return CheckResult(name, "fail", detail=str(exc),
+                           fix=_mount_failure_fix(str(exc)))
+    finally:
+        probe.unlink(missing_ok=True)
+    if proc.returncode == 0 and _text(proc.stdout) == PROBE_CONTENT:
+        return CheckResult(name, "ok", detail=str(workdir))
+    err = _text(proc.stderr) or _text(proc.stdout) or "the container read nothing back"
+    return CheckResult(name, "fail", detail=f"{workdir}\n{err}",
+                       fix=_mount_failure_fix(err))
+
+
 def run_checks(
     *,
     pull: bool,
@@ -179,6 +259,12 @@ def run_checks(
         return results
     if pull:
         results.append(check_pull(run))
+        if results[-1].status != "ok":
+            results.append(CheckResult("workdir bind-mounts", "skip",
+                                       detail="needs the image above"))
+            return results
+    base = workdir if workdir is not None else default_workdir()
+    results.append(check_workdir_mount(run, base))
     return results
 
 

@@ -10,12 +10,16 @@ them verbatim.
 from __future__ import annotations
 
 import subprocess
+import tempfile
+from pathlib import Path
 
 from flashnode.doctor import (
     CheckResult,
     check_cli_on_path,
     check_engine,
     check_pull,
+    check_workdir_mount,
+    default_workdir,
     exit_code,
     format_results,
 )
@@ -154,3 +158,78 @@ def test_pull_reports_a_timeout_rather_than_raising():
     def run(argv, **kwargs):
         raise subprocess.TimeoutExpired(cmd="docker", timeout=300)
     assert check_pull(run).status == "fail"
+
+
+def test_workdir_mount_passes_when_the_container_reads_the_probe_back(tmp_path):
+    result = check_workdir_mount(_runner(_proc(0, stdout="flashnode-doctor")), tmp_path)
+    assert result.status == "ok"
+
+
+def test_workdir_mount_writes_a_probe_file_the_container_can_read(tmp_path):
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        # The file must exist on the host BEFORE the container runs.
+        assert (tmp_path / "flashnode-doctor-probe.txt").is_file()
+        return _proc(0, stdout="flashnode-doctor")
+
+    check_workdir_mount(run, tmp_path)
+    assert "-v" in seen["argv"]
+
+
+def test_workdir_mount_fails_when_the_mount_is_empty_and_names_flashnode_workdir(tmp_path):
+    """The colima gotcha: Docker Desktop and colima share only $HOME on
+    macOS, so a workdir under /var/folders mounts as an EMPTY directory and
+    every task silently sees no inputs."""
+    result = check_workdir_mount(
+        _runner(_proc(1, stderr="FileNotFoundError: /work/flashnode-doctor-probe.txt")),
+        tmp_path,
+    )
+    assert result.status == "fail"
+    assert "FLASHNODE_WORKDIR" in result.fix
+    assert "$HOME" in result.fix
+
+
+def test_workdir_mount_fails_when_the_container_reads_the_wrong_content(tmp_path):
+    result = check_workdir_mount(_runner(_proc(0, stdout="something else")), tmp_path)
+    assert result.status == "fail"
+
+
+def test_workdir_mount_never_pulls(tmp_path):
+    """Startup must not depend on a registry (spec 4.1)."""
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return _proc(0, stdout="flashnode-doctor")
+
+    check_workdir_mount(run, tmp_path)
+    assert "--pull=never" in seen["argv"]
+
+
+def test_workdir_mount_says_run_the_doctor_when_the_image_is_not_cached(tmp_path):
+    result = check_workdir_mount(
+        _runner(_proc(125, stderr="Error: No such image: "
+                                  "ghcr.io/zolli-labs/flashml-python-slim:2026.08.1")),
+        tmp_path,
+    )
+    assert result.status == "fail"
+    assert "flashnode doctor" in result.fix
+
+
+def test_workdir_mount_cleans_up_its_probe_file(tmp_path):
+    check_workdir_mount(_runner(_proc(0, stdout="flashnode-doctor")), tmp_path)
+    assert not (tmp_path / "flashnode-doctor-probe.txt").exists()
+
+
+def test_default_workdir_prefers_flashnode_workdir(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLASHNODE_WORKDIR", str(tmp_path))
+    assert default_workdir() == tmp_path
+
+
+def test_default_workdir_falls_back_to_the_system_temp_dir(monkeypatch):
+    """Deliberately the same default ExecutorLoop uses (workdir_base=None),
+    so the doctor fails on exactly the machines the agent would."""
+    monkeypatch.delenv("FLASHNODE_WORKDIR", raising=False)
+    assert default_workdir() == Path(tempfile.gettempdir())
