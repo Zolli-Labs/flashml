@@ -14,7 +14,9 @@ import tempfile
 from pathlib import Path
 
 from flashnode.doctor import (
+    IMAGE_TAG,
     NON_BLOCKING_STATUSES,
+    PROBE_IMAGE,
     CheckResult,
     check_cli_on_path,
     check_engine,
@@ -215,8 +217,7 @@ def test_workdir_mount_never_pulls(tmp_path):
 
 def test_workdir_mount_says_run_the_doctor_when_the_image_is_not_cached(tmp_path):
     result = check_workdir_mount(
-        _runner(_proc(125, stderr="Error: No such image: "
-                                  "ghcr.io/zolli-labs/flashml-python-slim:2026.08.1")),
+        _runner(_proc(125, stderr=f"Error: No such image: {PROBE_IMAGE}")),
         tmp_path,
     )
     assert result.status == "fail"
@@ -512,3 +513,18 @@ def test_an_unknown_status_still_blocks():
     """`exit_code` widened from "everything ok" to "nothing blocking". It
     must stay fail-closed: a status this module does not know is not a pass."""
     assert exit_code([CheckResult("a", "ok"), CheckResult("b", "mystery")]) == 1
+
+
+# -- the curated-image tag ----------------------------------------------------
+
+
+def test_the_probe_image_derives_from_the_tag_constant():
+    """Task 8b step 3. The tag lives in three files across two repos —
+    this workflow's IMAGE_TAG, flashml-cloud's images.py, and here — and
+    NOTHING tests that the three agree; the test that would have was deleted
+    on 2026-08-01 when the image sources moved. What this can still pin is
+    that the tag is one greppable constant on this side rather than a
+    substring of a URL, so the next bump is one edit and cannot half-land.
+    """
+    assert PROBE_IMAGE.endswith(f":{IMAGE_TAG}")
+    assert PROBE_IMAGE.count(IMAGE_TAG) == 1

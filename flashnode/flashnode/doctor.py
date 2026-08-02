@@ -37,6 +37,7 @@ from flashnode.executor.hardening import (
 from flashnode.inventory.gpu import probe_gpus
 
 __all__ = [
+    "IMAGE_TAG",
     "NON_BLOCKING_STATUSES",
     "PROBE_IMAGE",
     "CheckResult",
@@ -55,12 +56,30 @@ __all__ = [
     "run_command",
 ]
 
+#: The curated-image tag this agent probes. It must equal `IMAGE_TAG` in
+#: `.github/workflows/images.yml` (which builds the images) and in
+#: flashml-cloud's `apps/api/flashml_cloud_api/images.py` (which hands
+#: references to jobs). All three are bumped together; the workflow's
+#: immutability guard refuses to repush an existing tag, so a bump is
+#: mandatory for any image change, never cosmetic.
+#:
+#: Named rather than baked into the string below because the drift is
+#: SILENT: old tags keep pulling forever, so a doctor probing an image two
+#: releases behind the fleet passes every check and certifies a host against
+#: an image no job will ever use. Nothing in either repo tests that the three
+#: agree — the test that would have is gone, deleted on 2026-08-01 when the
+#: image sources moved to this repo. One greppable constant per repo is what
+#: is left holding this together.
+IMAGE_TAG = "2026.08.2"
+
 #: The image every container-level check runs. python-slim, never
 #: pytorch-cpu: registry auth, TLS and the credential helper are properties
 #: of the REGISTRY, so the smallest curated image proves the same thing, and
 #: making a volunteer download gigabytes to learn their helper is missing is
-#: a hostile diagnostic. Kept in step with flashml-cloud's published tags.
-PROBE_IMAGE = "ghcr.io/zolli-labs/flashml-python-slim:2026.08.1"
+#: a hostile diagnostic. Never pytorch-cuda either, for the same reason
+#: doubled: a GPU host that cannot pull has the same broken registry as
+#: everyone else, and would find out 3 GB later.
+PROBE_IMAGE = f"ghcr.io/zolli-labs/flashml-python-slim:{IMAGE_TAG}"
 
 CommandRunner = Callable[..., subprocess.CompletedProcess]
 
