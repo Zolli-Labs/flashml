@@ -1,0 +1,34 @@
+# Root ignores for the FlashML public monorepo.
+#
+# flashruntime/ and flashnode/ each carry their own .gitignore, which still
+# applies within those directories. This file covers the repository root and
+# anything a build leaves at a level neither package owns.
+
+# Python build + install artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Test + tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets never belong in this repository at all — it is PUBLIC. This rule is a
+# backstop, not the control: the control is that no deploy configuration lives
+# here in the first place. The private control plane holds all of it.
+.env
+.env.*
+!.env.example
+
+# AI coding-agent scratch: task briefs, review diffs, session tokens. Local
+# tooling state, not repo content — and this repo is public.
+.superpowers/
+.claude/
+.gstack/
+
+.DS_Store

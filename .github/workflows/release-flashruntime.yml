@@ -1,16 +1,22 @@
-name: release
+name: release-flashruntime
 
-# Cut a release by pushing a version tag:  git tag v0.1.0 && git push --tags
+# Cut a flashruntime release by pushing a package-scoped version tag:
+#
+#   git tag flashruntime-v0.3.0 && git push origin flashruntime-v0.3.0
+#
+# The tag is package-scoped because this repo ships TWO packages on independent
+# versions. A bare `v*` tag would be ambiguous the moment flashnode is released.
 #
 #   build         — docs-first, then sdist + wheel; assert the wheel ships docs
+#   test          — the publish gate: a version tag is an IMMUTABLE PyPI release
 #   pypi-publish  — Trusted Publishing (OIDC), no token stored in the repo
 #   docs-deploy   — publish the docs site to GitHub Pages
 #
 # `workflow_dispatch` runs docs-deploy ONLY (a pages-only redeploy with no
-# release): build + pypi-publish are gated on a `v*` tag ref and skip.
+# release): build + pypi-publish are gated on the tag ref and skip.
 on:
   push:
-    tags: ["v*"]
+    tags: ["flashruntime-v*"]
   workflow_dispatch: {}
 
 permissions:
@@ -18,7 +24,7 @@ permissions:
 
 # Never cancel an in-flight release: a publish must finish.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-flashruntime-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -28,8 +34,11 @@ jobs:
     # wheel that silently ships docs-LESS. build_docs.py writes _docs/ first;
     # then we build and ASSERT the wheel actually contains the docs index.
     name: build (docs-first sdist + wheel)
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/flashruntime-v')
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flashruntime
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,32 +60,58 @@ jobs:
           echo "OK: wheel contains flashruntime/viewer/_docs/index.html"
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/
+          name: dist-flashruntime
+          # Action inputs resolve from the workspace root; `defaults.run` does
+          # not apply to them.
+          path: flashruntime/dist/
 
   test:
-    # Gate the publish on the SAME suite CI runs — one representative leg is enough
-    # (ubuntu-latest + Python 3.12, CPU torch, full pytest incl. e2e). A version tag
-    # ships an IMMUTABLE PyPI release, so a broken commit must never reach
-    # pypi-publish. Tag-only: the `if` skips this on workflow_dispatch, whose sole job
-    # is a docs-only Pages redeploy that must not drag the full test suite behind it.
+    # Gate the publish on the SAME suite CI runs — one representative leg is
+    # enough (ubuntu-latest + Python 3.12, CPU torch, full pytest incl. e2e). A
+    # version tag ships an IMMUTABLE PyPI release, so a broken commit must never
+    # reach pypi-publish. Tag-only: the `if` skips this on workflow_dispatch,
+    # whose sole job is a docs-only Pages redeploy.
     name: test (publish gate · py3.12 · ubuntu-latest)
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/flashruntime-v')
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flashruntime
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: flashruntime/pyproject.toml
       - name: Install CPU torch (runners have no CUDA)
-        # --extra-index-url (NOT --index-url): --index-url would REPLACE PyPI; keep it
-        # as resolver of last resort. (Gate leg is ubuntu, but stay consistent with ci.yml.)
         run: pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
       - name: Install flashruntime + test extras
         run: pip install -e ".[sklearn,dev,service]"
       - name: Run the suite (unit + e2e)
+        run: pytest
+
+  agent-compat:
+    # flashnode must still work against the exact commit being released.
+    # Without this, a protocol change ships to PyPI green and breaks every
+    # volunteer's agent on their next upgrade — which is the failure mode the
+    # monorepo exists to prevent.
+    name: agent-compat (flashnode against this commit)
+    if: startsWith(github.ref, 'refs/tags/flashruntime-v')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flashnode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: flashnode/pyproject.toml
+      - name: Install flashruntime from this tree, then flashnode
+        run: pip install -e ../flashruntime -e ".[dev]"
+      - name: Run the agent suite
         run: pytest
 
   pypi-publish:
@@ -85,12 +120,17 @@ jobs:
     # ONE-TIME SETUP (the maintainer does this once on PyPI, before the first
     # tag): https://pypi.org/manage/account/publishing/ → add a pending
     # publisher for project `flashruntime`, owner `Zolli-Labs`, repo
-    # `flashruntime`, workflow `release.yml`, environment `pypi`. Until that
-    # publisher exists this step 403s (the build job above still succeeds and
-    # the wheel is downloadable from the run's artifacts).
+    # `flashml`, workflow `release-flashruntime.yml`, environment `pypi`.
+    #
+    # NOTE the repo and workflow names: both changed when flashruntime moved
+    # into this monorepo. A publisher still pointing at repo `flashruntime` /
+    # workflow `release.yml` will reject this job with a 403.
+    #
+    # Until that publisher exists this step 403s — the build job still succeeds
+    # and the wheel is downloadable from the run's artifacts.
     name: pypi-publish (trusted publishing)
-    needs: [build, test]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test, agent-compat]
+    if: startsWith(github.ref, 'refs/tags/flashruntime-v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -98,20 +138,23 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: dist-flashruntime
           path: dist/
-      # SHA-pinned (not the mutable @release/v1 branch): this job holds id-token: write,
-      # so pin the exact commit and let a human read the version from the trailing tag.
+      # SHA-pinned (not the mutable @release/v1 branch): this job holds
+      # id-token: write, so pin the exact commit and let a human read the
+      # version from the trailing tag.
       - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247  # v1.14.1
 
   docs-deploy:
-    # Deploy the docs site to GitHub Pages. Runs on a `v*` tag (alongside the
-    # release) AND on manual workflow_dispatch (pages-only redeploy). The site
-    # goes live at https://zolli-labs.github.io/flashruntime/ on the first
-    # successful deploy after Pages is enabled for the repo (Settings → Pages →
-    # Source: GitHub Actions).
+    # Deploy the docs site to GitHub Pages. Runs on a release tag AND on manual
+    # workflow_dispatch (pages-only redeploy). The site goes live at
+    # https://zolli-labs.github.io/flashml/ on the first successful deploy after
+    # Pages is enabled (Settings → Pages → Source: GitHub Actions).
     name: docs-deploy (GitHub Pages)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flashruntime
     permissions:
       pages: write      # publish to Pages
       id-token: write   # OIDC token deploy-pages verifies
@@ -125,11 +168,11 @@ jobs:
           python-version: "3.11"
       - name: Install docs build deps
         run: pip install -e ".[dev]"
-      - name: Build the Pages site (writes site/)
+      - name: Build the Pages site (writes flashruntime/site/)
         run: python scripts/build_docs.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site/
+          path: flashruntime/site/
       - id: deploy
         uses: actions/deploy-pages@v4

@@ -4,18 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashnode"
-version = "0.1.0"
+# 0.2.0 is the FIRST published release; 0.1.0 never reached PyPI. Released from
+# the Zolli-Labs/flashml monorepo by pushing a `flashnode-v0.2.0` tag, and only
+# AFTER flashruntime 0.3.0 is on PyPI — see the floor below.
+version = "0.2.0"
 description = "Open host agent for the FlashML fragmented-compute network: join, benchmark, execute sandboxed ML tasks, earn contribution credits."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
-    # >=0.2: 0.1.0 predates NodeRegistration.module_capable — a volunteer on
-    # that wheel would register without the field, and the coordinator's
-    # fail-open module gate happens to tolerate that, but argv_capable's
-    # fail-closed gate does not: pin the floor where the wire fields this
-    # agent emits actually exist.
-    "flashruntime>=0.2",
+    # The floor is where the wire fields this agent emits actually exist.
+    # Originally >=0.2, because 0.1.0 predates NodeRegistration.module_capable:
+    # a volunteer on that wheel would register without the field, and the
+    # coordinator's fail-open module gate happens to tolerate that, but
+    # argv_capable's fail-closed gate does not.
+    #
+    # Raised to >=0.3,<0.4 for the first published release. 0.3.0 is the first
+    # flashruntime that exists on PyPI at all, so any lower floor names
+    # something a volunteer cannot install. The upper bound is deliberate: this
+    # agent runs on machines we cannot reach, so it must never be silently
+    # upgraded across a protocol-breaking runtime release.
+    "flashruntime>=0.3,<0.4",
     "psutil>=5.9",
     "websockets>=12",
     "cryptography>=42",

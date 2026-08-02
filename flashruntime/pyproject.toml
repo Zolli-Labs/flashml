@@ -5,7 +5,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashruntime"
-version = "0.2.0"
+# 0.3.0 is the FIRST published release. 0.1.0 and 0.2.0 were declared here but
+# never reached PyPI — the name 404'd until now — so nothing is superseded and
+# no installed version is being replaced. Released from the Zolli-Labs/flashml
+# monorepo by pushing a `flashruntime-v0.3.0` tag.
+version = "0.3.0"
 description = "Open fault-tolerant distributed ML runtime: strategy planning, job protocol, leases, checkpointing, and recovery across heterogeneous compute."
 readme = "README.md"
 # PEP 639 SPDX expression (string form) — replaces the deprecated

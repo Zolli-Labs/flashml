@@ -1,0 +1,114 @@
+name: release-flashnode
+
+# Cut a flashnode release by pushing a package-scoped version tag:
+#
+#   git tag flashnode-v0.2.0 && git push origin flashnode-v0.2.0
+#
+# RELEASE ORDER MATTERS. flashnode declares a floor on flashruntime, so
+# releasing flashnode before the flashruntime version it requires produces a
+# package nobody can install. Release flashruntime first, wait for it to appear
+# on PyPI, then tag flashnode. The `resolvable` job below fails loudly if you
+# get this wrong, rather than publishing something broken.
+on:
+  push:
+    tags: ["flashnode-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-flashnode-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (sdist + wheel)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flashnode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build
+        run: pip install build
+      - name: Build sdist + wheel
+        run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-flashnode
+          path: flashnode/dist/
+
+  test:
+    # The publish gate. Runs against flashruntime FROM THIS TREE, which is what
+    # the tagged commit actually describes.
+    name: test (publish gate · py3.12 · ubuntu-latest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flashnode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: flashnode/pyproject.toml
+      - name: Install flashruntime from this tree, then flashnode
+        run: pip install -e ../flashruntime -e ".[dev]"
+      - name: Run the agent suite
+        run: pytest
+
+  resolvable:
+    # A volunteer runs `pip install flashnode` against PyPI, not against this
+    # tree. If flashnode's declared flashruntime floor is not yet ON PyPI, that
+    # install fails with a resolver error — and the person seeing it concludes
+    # our install is broken, because from where they stand it is.
+    #
+    # So: build the wheel, then install it in a clean environment with ONLY
+    # PyPI available. This is the one check that reflects the volunteer's
+    # actual experience.
+    name: resolvable (install the built wheel from PyPI deps only)
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-flashnode
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the wheel with only PyPI to resolve against
+        run: |
+          python -m venv clean
+          if ! clean/bin/python -m pip install dist/*.whl; then
+            echo "::error::the built flashnode wheel cannot be installed from PyPI."
+            echo "::error::Most likely its flashruntime floor is not published yet."
+            echo "::error::Release flashruntime FIRST, wait for PyPI, then re-tag."
+            exit 1
+          fi
+      - name: Prove the console script and the import both work
+        run: |
+          clean/bin/flashnode --help > /dev/null
+          clean/bin/python -c "import flashnode, flashruntime; print(flashruntime.__version__)"
+
+  pypi-publish:
+    # ONE-TIME SETUP on PyPI before the first tag:
+    # https://pypi.org/manage/account/publishing/ → pending publisher for
+    # project `flashnode`, owner `Zolli-Labs`, repo `flashml`, workflow
+    # `release-flashnode.yml`, environment `pypi`.
+    name: pypi-publish (trusted publishing)
+    needs: [build, test, resolvable]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-flashnode
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247  # v1.14.1
