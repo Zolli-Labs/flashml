@@ -56,6 +56,32 @@ def test_discover_degrades_without_kubernetes(monkeypatch):
     assert reg.capabilities.gpus == []  # never guessed
 
 
+def test_discover_advertises_what_the_gpu_probe_found(monkeypatch):
+    """The probe is only as real as the field it reaches: without this,
+    `gpus` stays `[]` on every host and the coordinator's GPU gate refuses
+    every GPU job forever."""
+    from flashruntime.protocol.v1alpha1 import GpuInfo
+
+    monkeypatch.setattr(
+        "flashnode.inventory.capabilities.probe_gpus",
+        lambda: [GpuInfo(index=0, name="NVIDIA A100", memory_total_mb=40960)],
+    )
+    reg = discover("node-gpu", kubernetes_node="", node_meta=None)
+    assert [g.index for g in reg.capabilities.gpus] == [0]
+    assert reg.capabilities.gpus[0].name == "NVIDIA A100"
+
+
+def test_a_failing_gpu_probe_never_stops_registration(monkeypatch):
+    """A host that cannot probe must still register and take CPU work."""
+
+    def boom():
+        raise RuntimeError("nvidia-smi went sideways")
+
+    monkeypatch.setattr("flashnode.inventory.capabilities.probe_gpus", boom)
+    reg = discover("node-cpu", kubernetes_node="", node_meta=None)
+    assert reg.capabilities.gpus == []
+
+
 def test_argv_capable_defaults_false():
     reg = discover("node-1", kubernetes_node="", node_meta=None)
     assert reg.argv_capable is False

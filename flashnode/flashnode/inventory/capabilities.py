@@ -14,6 +14,7 @@ import socket
 import psutil
 
 from flashnode.config.local_data import load_local_data
+from flashnode.inventory.gpu import probe_gpus
 from flashruntime.protocol.v1alpha1 import (
     NodeCapabilities,
     NodeEnvironment,
@@ -90,6 +91,17 @@ def discover(node_id: str, kubernetes_node: str,
 
     from flashnode import __version__
 
+    # What `nvidia-smi` reports, or nothing. probe_gpus already promises it
+    # never raises; this is a second lock on the same door, because the cost
+    # of being wrong here is not "no GPU work" but "this agent does not
+    # start" — on a machine that was only ever going to run CPU tasks. Unlike
+    # local_datasets below, an unreadable GPU is not a misconfiguration the
+    # owner must fix; it is the normal state of most hosts.
+    try:
+        gpus = probe_gpus()
+    except Exception:
+        gpus = []
+
     return NodeRegistration(
         node_id=node_id,
         kubernetes_node=kubernetes_node,
@@ -97,7 +109,11 @@ def discover(node_id: str, kubernetes_node: str,
         capabilities=NodeCapabilities(
             cpu_cores=cpu,
             memory_bytes=memory,
-            gpus=[],  # GPU probing is a documented follow-up; never guess.
+            # One entry per device the driver reports; [] on the hosts that
+            # have no driver, which is most of them. Placement reads the
+            # LENGTH of this list, so an entry we are unsure of is worse
+            # than no entry — see inventory/gpu.py.
+            gpus=gpus,
             os=labels.get("kubernetes.io/os", platform.system().lower()),
             architecture=labels.get("kubernetes.io/arch", arch),
         ),
