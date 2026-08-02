@@ -26,6 +26,7 @@ commands:
             (--coordinator URL; --token TOKEN to skip the browser step)
   logout    remove the saved bearer token for a FlashRuntime coordinator
             (--coordinator URL)
+  doctor    check this machine can run tasks (docker engine, images, mounts)
   join      connect this machine to a FlashML control plane (not yet implemented)
   status    show node identity, capabilities, and active leases (not yet implemented)
   leave     drain and disconnect (not yet implemented)
@@ -270,6 +271,10 @@ def main(argv: list[str] | None = None) -> int:
         return agent_main()
     if args and args[0] == "work":
         return _work(args[1:])
+    if args and args[0] == "doctor":
+        from flashnode.doctor import doctor_main
+
+        return doctor_main(args[1:])
     if args and args[0] == "login":
         return _login(args[1:])
     if args and args[0] == "logout":
