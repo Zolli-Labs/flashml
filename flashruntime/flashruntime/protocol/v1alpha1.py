@@ -78,6 +78,13 @@ class ResourcesSpec(BaseModel):
     maximumWorkers: int = Field(ge=1, default=3)
     cpuPerTask: float = Field(gt=0, default=1)
     memoryPerTask: str = "512Mi"
+    #: GPUs each task needs. 0 — the default, and every job that exists
+    #: today — means "no GPU required" and places anywhere. A non-zero value
+    #: is a hardware *requirement*, enforced fail-closed at placement
+    #: (`scheduler.IsolationAwarePlacement`): a CUDA task on a CPU-only host
+    #: does not politely requeue, it crashes or silently runs on the CPU two
+    #: orders of magnitude slower while reporting success.
+    gpuPerTask: int = Field(ge=0, default=0)
 
     @field_validator("maximumWorkers")
     @classmethod
@@ -269,10 +276,39 @@ class NodeEnvironment(str, Enum):
     EDGE = "edge"
 
 
+class GpuInfo(BaseModel):
+    """One GPU as the host's driver reports it.
+
+    Every field but `index` is optional: a probe that cannot read a value says
+    nothing rather than guessing, so a partial reading is still reportable and
+    an unreadable one is still `[]` rather than a fabricated device.
+
+    Typed now although placement matches only on COUNT, because the wire
+    format is the expensive thing to change later — these agents run on
+    machines we cannot reach, and a field added to an existing model is cheap
+    where turning a `dict` into a model is not. `memory_total_mb` and
+    `compute_capability` are collected from the start so the data is already
+    flowing when matching rules arrive (spec §10.1).
+
+    No `schema_version`: like `CheckpointPart`, this is a nested element of a
+    versioned message (`NodeRegistration`), not a wire message of its own.
+    """
+
+    index: int
+    name: str = ""
+    memory_total_mb: int | None = None
+    driver_version: str = ""
+    compute_capability: str = ""
+
+
 class NodeCapabilities(BaseModel):
     cpu_cores: float | None = None
     memory_bytes: int | None = None
-    gpus: list[dict[str, Any]] = Field(default_factory=list)
+    #: Devices this host's driver reports, one entry per GPU. Empty is the
+    #: honest answer for a host with no driver, no `nvidia-smi`, or output
+    #: this runtime cannot parse — never a guess. Placement reads the LENGTH
+    #: of this list and nothing else in v1.
+    gpus: list[GpuInfo] = Field(default_factory=list)
     os: str = ""
     architecture: str = ""
 
