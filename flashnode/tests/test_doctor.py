@@ -15,6 +15,7 @@ from flashnode.doctor import (
     CheckResult,
     check_cli_on_path,
     check_engine,
+    check_pull,
     exit_code,
     format_results,
 )
@@ -103,3 +104,53 @@ def test_format_shows_the_fix_for_a_failure_and_a_trailing_count():
 def test_format_says_nothing_alarming_when_all_pass():
     text = format_results([CheckResult("docker CLI on PATH", "ok")])
     assert "failed" not in text
+
+
+# The macOS failure that stopped the 2026-08-02 run-through. The engine was
+# healthy; a credential helper named in ~/.docker/config.json was not
+# installed, and Docker consults it when authenticating a registry pull.
+CREDS_HELPER_MISSING = (
+    'error getting credentials - err: exec: "docker-credential-desktop": '
+    "executable file not found in $PATH, out: ``"
+)
+
+
+def test_pull_passes_and_names_the_image():
+    result = check_pull(_runner(_proc(0, stdout="Status: Image is up to date")))
+    assert result.status == "ok"
+    assert "flashml-python-slim" in result.detail
+
+
+def test_pull_fails_on_a_missing_credential_helper_and_says_it_needs_no_login():
+    result = check_pull(_runner(_proc(1, stderr=CREDS_HELPER_MISSING)))
+    assert result.status == "fail"
+    assert "docker-credential-desktop" in result.detail
+    assert "credsStore" in result.fix
+    assert "no login" in result.fix.lower()
+
+
+def test_pull_fails_on_denied_and_points_at_image_visibility():
+    """The GHCR-private outage: every job died at execution after signup,
+    install and enrolment all appeared to work."""
+    result = check_pull(_runner(_proc(1, stderr="denied: denied")))
+    assert result.status == "fail"
+    assert "public" in result.fix.lower()
+
+
+def test_pull_uses_the_small_image_never_pytorch():
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return _proc(0)
+
+    check_pull(run)
+    assert seen["argv"][:2] == ["docker", "pull"]
+    assert "python-slim" in seen["argv"][2]
+    assert "pytorch" not in seen["argv"][2]
+
+
+def test_pull_reports_a_timeout_rather_than_raising():
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=300)
+    assert check_pull(run).status == "fail"

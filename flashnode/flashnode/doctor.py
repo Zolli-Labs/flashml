@@ -31,6 +31,7 @@ __all__ = [
     "CheckResult",
     "check_cli_on_path",
     "check_engine",
+    "check_pull",
     "doctor_main",
     "exit_code",
     "format_results",
@@ -118,6 +119,43 @@ def check_engine(run: CommandRunner) -> CheckResult:
     )
 
 
+def check_pull(run: CommandRunner, image: str = PROBE_IMAGE) -> CheckResult:
+    """Pull the smallest curated image.
+
+    This is the check the Mac needed. The pull is the only step that touches
+    a registry and therefore the only one that consults a credential helper
+    — tasks themselves run `--network none`. It also re-catches the GHCR
+    visibility regression, where the images went private and every job died
+    at execution while signup, install and enrolment all looked fine.
+    """
+    name = "pull a curated image"
+    try:
+        proc = run(["docker", "pull", image], timeout=600.0)
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            name, "fail", detail=f"`docker pull {image}` did not finish in 10 minutes",
+            fix="Check this machine's internet connection, then re-run "
+                "`flashnode doctor`.",
+        )
+    except OSError as exc:
+        return CheckResult(name, "fail", detail=str(exc),
+                           fix="Install Docker and re-run `flashnode doctor`.")
+    if proc.returncode == 0:
+        return CheckResult(name, "ok", detail=image)
+    err = _text(proc.stderr) or _text(proc.stdout)
+    if "credential" in err or "docker-credential" in err:
+        fix = ("Your ~/.docker/config.json names a credential helper that is "
+               "not installed. Either start Docker Desktop, or remove the "
+               '"credsStore" line — these images are public and need no login.')
+    elif "denied" in err or "unauthorized" in err:
+        fix = ("The registry refused an anonymous pull. These images are "
+               "meant to be public; report this — it is our bug, not yours.")
+    else:
+        fix = ("Check this machine's internet connection and that "
+               "ghcr.io is reachable, then re-run `flashnode doctor`.")
+    return CheckResult(name, "fail", detail=f"{image}\n{err}", fix=fix)
+
+
 def run_checks(
     *,
     pull: bool,
@@ -137,6 +175,10 @@ def run_checks(
     if results[-1].status != "ok":
         return results
     results.append(check_engine(run))
+    if results[-1].status != "ok":
+        return results
+    if pull:
+        results.append(check_pull(run))
     return results
 
 
