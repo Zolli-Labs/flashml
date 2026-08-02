@@ -91,9 +91,16 @@ jobs:
             exit 1
           fi
       - name: Prove the console script and the import both work
+        # `flashruntime.__version__` does NOT exist — the package deliberately
+        # exposes no version attribute and raises AttributeError via its
+        # module __getattr__. Read it from installed metadata instead.
         run: |
           clean/bin/flashnode --help > /dev/null
-          clean/bin/python -c "import flashnode, flashruntime; print(flashruntime.__version__)"
+          clean/bin/python -c "
+          from importlib.metadata import version
+          import flashnode, flashruntime
+          print('flashnode', version('flashnode'), '/ flashruntime', version('flashruntime'))
+          "
 
   pypi-publish:
     # ONE-TIME SETUP on PyPI before the first tag:
