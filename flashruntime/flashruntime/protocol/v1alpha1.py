@@ -297,6 +297,16 @@ class NodeRegistration(BaseModel):
     #: keeps receiving module work; only a node that explicitly opts into
     #: an argv-only runner sets this False (see scheduler.IsolationAwarePlacement).
     module_capable: bool = True
+    #: Names of datasets this node holds locally and offers to jobs. Names
+    #: only — never paths: a host path is host-private and must not travel to
+    #: the coordinator. Defaults to an empty list, so a node advertises
+    #: nothing until its operator explicitly maps a dataset: an agent that has
+    #: not opted in must never be eligible for local-data work, and an absent
+    #: field on an already-deployed agent's registration must read as "offers
+    #: nothing" rather than "offers anything" (security fields fail closed).
+    #: `default_factory` and not a bare `[]` — one shared list would let a
+    #: single node's advertisement leak into every other node's registration.
+    local_datasets: list[str] = Field(default_factory=list)
     pool: str = "local"
     runtime_profile: str = "kubernetes"
     labels: dict[str, str] = Field(default_factory=dict)
