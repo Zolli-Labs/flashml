@@ -32,10 +32,27 @@ verified results. Two profiles:
   inside managed pools (DaemonSet); KubeRay owns workload pods there.
   Implemented.
 
+## Check your machine first
+
+```bash
+flashnode doctor
+```
+
+Six checks: the `docker` CLI, the engine behind it, an anonymous pull of a
+curated image, whether a container can see your work directory, whether your
+Docker accepts the sandbox flags, and whether any directories you lend via
+`FLASHNODE_LOCAL_DATA` are readable. Every failure names the fix.
+
+Run it once before `flashnode work`. `work` repeats all of it **except** the
+image pull — a registry blip should not stop an agent whose images are
+already cached — and refuses to start if anything fails, because a host that
+cannot run tasks should not be claiming them.
+
 ## What it does today
 
 ```bash
 pip install -e .                      # plus: pip install -e ../flashruntime
+flashnode doctor                      # check this machine can run tasks
 flashnode work --coordinator http://<coordinator>:8100
 # optional hardening / pool config:
 #   FLASHNODE_JOIN_CODE=...          join-code-gated pools

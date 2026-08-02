@@ -376,3 +376,35 @@ def test_run_checks_without_pull_never_calls_docker_pull(tmp_path):
     run_checks(pull=False, run=run, which=lambda _: "/usr/local/bin/docker",
                workdir=tmp_path, raw_local_data="")
     assert not any(c[:2] == ["docker", "pull"] for c in calls)
+
+
+def test_patching_shutil_which_is_observed_by_the_doctor(monkeypatch):
+    """Regression. `def check_cli_on_path(which=shutil.which)` binds the
+    ORIGINAL function at import, so monkeypatching the module attribute —
+    the idiom the rest of this suite uses — silently failed to reach it.
+
+    That was not a testing inconvenience. It let the `flashnode work` gate
+    ignore a patched `which`, execute a REAL `docker run` inside unit tests,
+    and pass or fail with whatever state the machine's Docker happened to be
+    in. Resolve side effects at call time, not in a default argument.
+    """
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert check_cli_on_path().status == "fail"
+
+    results = run_checks(pull=True, raw_local_data="")
+    assert results[0].status == "fail"
+    assert exit_code(results) == 1
+
+
+def test_run_checks_defaults_do_not_capture_run_command_at_import(monkeypatch):
+    """Same bug class for the command runner: patching the module attribute
+    must be observed, or the gate shells out for real under test."""
+    calls = []
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/docker")
+    monkeypatch.setattr(
+        "flashnode.doctor.run_command",
+        lambda argv, **kw: calls.append(list(argv)) or _proc(1, stderr=ENGINE_PING_500),
+    )
+    results = run_checks(pull=True, raw_local_data="")
+    assert calls, "run_checks did not use the patched run_command"
+    assert results[1].status == "fail"

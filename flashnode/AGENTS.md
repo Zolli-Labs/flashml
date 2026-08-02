@@ -78,6 +78,20 @@ never executes workloads — KubeRay owns workload pods. Tests: `pytest` (28 —
    workspace-root `e2e/`. Two heartbeats, never merged: attempt →
    coordinator (lease liveness), node → registry (online/offline). Wire
    models from `flashruntime.protocol` (hard rule 2).
+   **Host doctor** (`doctor.py`, `flashnode doctor`): six checks — CLI on
+   PATH, engine reachable, a curated image pulls, the workdir bind-mounts,
+   the real `harden_args` flags are accepted, and every
+   `FLASHNODE_LOCAL_DATA` label resolves to a readable directory. It also
+   gates `flashnode work` fail-closed, replacing the old
+   `shutil.which("docker")` — which BOTH hosts that stopped the 2026-08-02
+   §10 run-through passed before failing every task they claimed. Checks
+   take their subprocess/which call as a parameter, so the whole suite runs
+   with no daemon. `work` passes `pull=False`: a registry blip must not stop
+   an agent whose images are cached, so checks 4 and 5 use `--pull=never`
+   and a fresh install must run `flashnode doctor` once.
+   **NOT covered: mid-session breakage.** A host whose engine dies an hour
+   in still claims and fails tasks exactly as before; the fix is server-side
+   node quarantine in the coordinator, not here.
    **Missing/next**: Ed25519 identity, gVisor/Kata tiers,
    `join/status/leave` UX. `benchmark/`, `telemetry/`, `config/` now
    carry their complete designed interfaces (ABCs + contract tests in

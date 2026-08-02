@@ -10,7 +10,7 @@ name = "flashnode"
 # hardcoded __version__ that made every agent register as 0.1.0.) Released from
 # the Zolli-Labs/flashml monorepo by pushing a `flashnode-vX.Y.Z` tag, and only
 # AFTER the flashruntime floor below is on PyPI.
-version = "0.3.0"
+version = "0.3.1"
 description = "Open host agent for the FlashML fragmented-compute network: join, benchmark, execute sandboxed ML tasks, earn contribution credits."
 readme = "README.md"
 license = { text = "Apache-2.0" }

@@ -91,7 +91,15 @@ def _text(raw: bytes | str | None) -> str:
     return raw.decode(errors="replace").strip()
 
 
-def check_cli_on_path(which: Callable[[str], str | None] = shutil.which) -> CheckResult:
+def check_cli_on_path(which: Callable[[str], str | None] | None = None) -> CheckResult:
+    # Resolved at CALL time, never as a default argument. `def f(which=
+    # shutil.which)` captures the original function object at import, so
+    # `monkeypatch.setattr("shutil.which", ...)` — the idiom the rest of this
+    # suite uses, and documents in test_agent.py — silently fails to reach
+    # it. That is not merely a testing inconvenience: it let the `work` gate
+    # ignore a patched `which`, run a REAL `docker run` inside unit tests,
+    # and pass or fail with the machine's Docker state.
+    which = which or shutil.which
     name = "docker CLI on PATH"
     found = which("docker")
     if found:
@@ -348,8 +356,8 @@ def check_local_datasets(raw: str | None = None) -> CheckResult:
 def run_checks(
     *,
     pull: bool,
-    run: CommandRunner = run_command,
-    which: Callable[[str], str | None] = shutil.which,
+    run: CommandRunner | None = None,
+    which: Callable[[str], str | None] | None = None,
     workdir: Path | None = None,
     raw_local_data: str | None = None,
 ) -> list[CheckResult]:
@@ -360,6 +368,9 @@ def run_checks(
     daemon on someone else's machine, and a transient registry blip must not
     stop one whose images are already cached (spec §4.1).
     """
+    # Same call-time resolution as check_cli_on_path, for the same reason.
+    run = run or run_command
+    which = which or shutil.which
     base = workdir if workdir is not None else default_workdir()
     # Every container-level check, in order, each paired with the callable
     # that runs it. A failure skips the rest of THIS list; the local-dataset
