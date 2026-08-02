@@ -16,6 +16,9 @@ import sys
 import uuid
 from pathlib import Path, PureWindowsPath
 
+from flashnode.config.local_data import LocalDataError, check_label, load_local_data
+from flashnode.executor.runner import TaskExecutionError
+
 CONTAINER_WORKDIR = "/work"
 
 # Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*. We prefix
@@ -112,14 +115,91 @@ def _bind_mount_source(workdir: Path) -> str:
     return str(workdir)
 
 
+def local_data_mounts(
+    local_inputs: object,
+    available: dict[str, str] | None = None,
+) -> list[str]:
+    """`-v` flags binding the host owner's local datasets READ-ONLY under
+    `/work/inputs/<label>`, for the labels this payload asked for.
+
+    This is the half of the local-data feature that never uploads anything:
+    the bytes stay on the owner's disk and the task reads them in place. Three
+    properties are load-bearing.
+
+    - **`:ro`, always.** The owner lends the data; they do not hand a
+      stranger's code write access to it. There is no flag to turn this off.
+    - **Only what was requested.** A payload that names `patients` gets
+      `patients`. A host that also lends `labs` does not silently expose it to
+      a job that never asked — least privilege, per task.
+    - **Refuse rather than run half-fed** (AGENTS.md rule 3, fail closed). A
+      label this host has not mapped is a `TaskExecutionError` naming the
+      label — the *task* fails and requeues elsewhere; the agent lives. It
+      should not be reachable at all, because the coordinator's placement gate
+      reads the same advertisement this host published, so arriving here means
+      gate and host disagree — precisely the moment to stop, not to improvise
+      an empty directory the workload would read as "no patients".
+
+    `local_inputs` comes from an untrusted payload, so it is type-checked and
+    charset-checked here rather than trusted to be the list the compiler
+    produced. A label is never joined to a host path: it is a map key, and one
+    container-side directory segment.
+
+    `available` defaults to the host owner's `FLASHNODE_LOCAL_DATA` — read
+    only when a task actually asks for something, so a host whose value is
+    malformed fails the tasks that need it rather than every task on the
+    machine.
+    """
+    if local_inputs is None:
+        return []
+    if not isinstance(local_inputs, list) or not all(
+        isinstance(name, str) for name in local_inputs
+    ):
+        raise TaskExecutionError(
+            "payload 'local_inputs' must be a list of local dataset labels"
+        )
+    if not local_inputs:
+        return []
+    if available is None:
+        try:
+            available = load_local_data()
+        except LocalDataError as exc:
+            # Barely reachable — `discover()` parses the same value at startup
+            # and the agent refuses to register on a malformed one. If it ever
+            # is reached, a misconfigured host fails a task; it does not die.
+            raise TaskExecutionError(f"host local-data config is unusable: {exc}") from None
+    args: list[str] = []
+    for label in local_inputs:
+        try:
+            check_label(label)
+        except LocalDataError as exc:
+            raise TaskExecutionError(str(exc)) from None
+        if label not in available:
+            raise TaskExecutionError(
+                f"task requires local dataset {label!r}, which this host does "
+                "not provide — refusing to run"
+            )
+        source = _bind_mount_source(Path(available[label]))
+        args += ["-v", f"{source}:{CONTAINER_WORKDIR}/inputs/{label}:ro"]
+    return args
+
+
 def harden_args(
     workdir: Path,
     *,
     cpus: float,
     memory_gb: float,
     pids_limit: int = 512,
+    local_inputs: object = None,
+    local_data: dict[str, str] | None = None,
 ) -> list[str]:
-    """Docker flags common to every sandboxed task."""
+    """Docker flags common to every sandboxed task.
+
+    `local_inputs` is the payload's list of local dataset labels (None or []
+    for the overwhelmingly common task that needs none, and then the flags are
+    byte-for-byte what they were before the feature existed). `local_data` is
+    the host owner's label→path map; it defaults to their environment, so a
+    runner never has to know where the map comes from.
+    """
     return [
         # the job never reaches the volunteer's LAN or the internet; the
         # agent is the courier for inputs, outputs, and checkpoints
@@ -137,5 +217,8 @@ def harden_args(
         "--memory-swap", f"{memory_gb}g",
         "--ulimit", "nofile=1024:1024",
         "-v", f"{_bind_mount_source(workdir)}:{CONTAINER_WORKDIR}",
+        # After the workdir mount, never before: these land *inside* it, at
+        # /work/inputs/<label>, and the outer mount has to exist first.
+        *local_data_mounts(local_inputs, local_data),
         "-w", CONTAINER_WORKDIR,
     ]

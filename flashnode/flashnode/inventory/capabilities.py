@@ -13,6 +13,7 @@ import socket
 
 import psutil
 
+from flashnode.config.local_data import load_local_data
 from flashruntime.protocol.v1alpha1 import (
     NodeCapabilities,
     NodeEnvironment,
@@ -110,6 +111,16 @@ def discover(node_id: str, kubernetes_node: str,
         # coordinator's module gate is fail-open (unlike argv_capable), so
         # the default here matches every caller that doesn't pass it.
         module_capable=module_capable,
+        # The LABELS of the datasets this host owner lends to tasks
+        # (FLASHNODE_LOCAL_DATA) — never the paths. The coordinator needs the
+        # names to place a job that requires `patients` on a machine that has
+        # it; it has no use for `/srv/data/patients-2026`, which would leak
+        # the owner's directory layout, their username, and often the
+        # dataset's identity off the machine the whole feature exists to keep
+        # the data on. Sorted so the wire form is stable across restarts.
+        # A malformed value raises out of here rather than advertising a
+        # subset: an owner who typed it wrong must find out at startup.
+        local_datasets=sorted(load_local_data()),
         pool=labels.get("flashml.dev/pool", os.environ.get("FLASHNODE_POOL", "local")),
         runtime_profile=os.environ.get("FLASHNODE_RUNTIME_PROFILE", "kubernetes"),
         labels=labels,

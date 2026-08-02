@@ -70,7 +70,13 @@ class ArgvDockerRunner:
         name = container_name(payload.get("task_id"))
         command = [
             "docker", "run", "--rm", "--name", name,
-            *harden_args(workdir, cpus=self.cpus, memory_gb=self.memory_gb),
+            *harden_args(
+                workdir, cpus=self.cpus, memory_gb=self.memory_gb,
+                # The host owner's local datasets this task asked for. Refused
+                # here (before any subprocess) if this host does not lend them
+                # — see hardening.local_data_mounts.
+                local_inputs=payload.get("local_inputs"),
+            ),
             *env_args,
             image,          # argv follows the image, where docker treats it
             *argv,          # as the container command: leading '-' is inert

@@ -43,7 +43,16 @@ flashnode work --coordinator http://<coordinator>:8100
 #   FLASHNODE_WORKDIR=$HOME/.cache/flashnode   (macOS + colima: VM-visible workdirs)
 #   FLASHNODE_WORKDIR=C:\Users\<you>\.flashnode  (Windows: must be under a
 #                                                 directory Docker Desktop shares)
+#   FLASHNODE_LOCAL_DATA=patients=/srv/data/patients-2026,labs=/srv/labs
+#                                    lend local directories to tasks by LABEL
 ```
+
+`FLASHNODE_LOCAL_DATA` lets you offer data **without uploading it**. Only the
+label names (`patients`, `labs`) are advertised to the coordinator — never the
+paths — and a task that names a label in its `local_inputs` gets that directory
+bind-mounted **read-only** at `/work/inputs/<label>`. A task asking for a label
+this machine does not lend is refused, not run half-fed; a task that asks for
+nothing sees nothing, exactly as before.
 
 If the coordinator enforces per-machine authentication
 (`FLASHML_NODE_TOKENS` set server-side), save the bearer token you were

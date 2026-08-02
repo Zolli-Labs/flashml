@@ -75,7 +75,12 @@ class DockerRunner:
         name = container_name(payload.get("task_id"))
         argv = [
             "docker", "run", "--rm", "--name", name,
-            *harden_args(workdir, cpus=self.cpus, memory_gb=self.memory_gb),
+            *harden_args(
+                workdir, cpus=self.cpus, memory_gb=self.memory_gb,
+                # See hardening.local_data_mounts: read-only, only what the
+                # payload named, and a refusal if this host does not lend it.
+                local_inputs=payload.get("local_inputs"),
+            ),
             image,
             "python", "-m", module,
             "--spec", f"{CONTAINER_WORKDIR}/spec.json",
