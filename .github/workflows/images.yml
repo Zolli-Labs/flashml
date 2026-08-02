@@ -82,14 +82,34 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
-      # Independent images: one failing must not cancel the other two, or a
+      # Independent images: one failing must not cancel the others, or a
       # transient registry error looks like a broken Dockerfile.
       fail-fast: false
       matrix:
-        alias: [python-slim, sklearn, pytorch-cpu]
+        # pytorch-cuda joined 2026-08-02. It needs no structural change here
+        # — same build, same non-root check, same digest report — but it is
+        # multi-gigabyte, so its matrix leg runs several times longer than the
+        # other three. That is expected, not a hung job.
+        alias: [python-slim, sklearn, pytorch-cpu, pytorch-cuda]
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Make room for the CUDA image
+        if: matrix.alias == 'pytorch-cuda'
+        # A GitHub-hosted runner has ~14 GB free. pytorch-cuda needs that
+        # twice over: buildkit's copy while building, then a real `docker
+        # pull` in the verify steps below (build-push-action pushes straight
+        # from buildkit, so the image is genuinely not in the local store
+        # afterwards). Without this the leg dies with "no space left on
+        # device" somewhere in the middle of a ten-minute build, which reads
+        # like a broken Dockerfile and is not. The other three images are
+        # small enough that this is a waste of a minute, hence the guard.
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost /usr/share/swift
+          df -h /
 
       - uses: docker/setup-buildx-action@v3
 
@@ -144,15 +164,41 @@ jobs:
         run: |
           ref="${REGISTRY}/${NAMESPACE}/flashml-${{ matrix.alias }}:${IMAGE_TAG}"
           case "${{ matrix.alias }}" in
-            python-slim) mods="json os sys" ;;
-            sklearn)     mods="numpy pandas sklearn scipy joblib threadpoolctl" ;;
-            pytorch-cpu) mods="torch numpy" ;;
+            python-slim)  mods="json os sys" ;;
+            sklearn)      mods="numpy pandas sklearn scipy joblib threadpoolctl" ;;
+            pytorch-cpu)  mods="torch numpy" ;;
+            pytorch-cuda) mods="torch numpy" ;;
           esac
           for m in $mods; do
             docker run --rm "$ref" python -c "import $m" \
               || { echo "::error::$ref cannot import $m"; exit 1; }
           done
           echo "all declared packages import cleanly"
+
+      - name: Verify the CUDA build is a CUDA build
+        if: matrix.alias == 'pytorch-cuda'
+        # `torch.cuda.is_available()` CANNOT be asserted here: GitHub-hosted
+        # runners have no NVIDIA device, so it is False in this image no
+        # matter how correct the image is. What IS checkable without a device
+        # is that the wheel we installed is the cu124 one — the failure mode
+        # --index-url exists to prevent is a silent fall back to a PyPI build
+        # compiled against a different CUDA version, and that shows up in
+        # torch.version.cuda long before any host sees it.
+        #
+        # The real proof — a job running on a device — is the rented-GPU
+        # validation in the GPU plan's Task 11, and nothing here substitutes
+        # for it.
+        run: |
+          ref="${REGISTRY}/${NAMESPACE}/flashml-${{ matrix.alias }}:${IMAGE_TAG}"
+          cuda=$(docker run --rm "$ref" python -c "import torch; print(torch.version.cuda)")
+          echo "torch.version.cuda=$cuda"
+          case "$cuda" in
+            12.4*) echo "cu124 build confirmed" ;;
+            *) echo "::error::$ref carries a CUDA $cuda torch, expected 12.4"
+               echo "::error::pip most likely resolved torch from PyPI —"
+               echo "::error::check the --index-url in images/pytorch-cuda/Dockerfile."
+               exit 1 ;;
+          esac
 
       - name: Report the digest
         # Recorded so a later change can pin by digest instead of tag

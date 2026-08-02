@@ -26,7 +26,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGES_DIR = REPO_ROOT / "images"
 
-EXPECTED_ALIASES = {"python-slim", "sklearn", "pytorch-cpu"}
+EXPECTED_ALIASES = {"python-slim", "sklearn", "pytorch-cpu", "pytorch-cuda"}
 
 # Names Docker treats as root regardless of spelling.
 _ROOT_NAMES = {"root", "0"}
