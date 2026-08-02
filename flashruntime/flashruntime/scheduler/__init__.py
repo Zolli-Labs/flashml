@@ -172,6 +172,43 @@ class IsolationAwarePlacement(PlacementPolicy):
     is not in its map) — failing closed here makes it fail before anything
     touches the data, and before an attempt is burned.
 
+    A fifth gate applies to tasks whose payload asks for `gpus: N`: the
+    claiming node's `capabilities.gpus` must be a list of at least N entries.
+    It takes the argv/local-data polarity — **fail closed** — and deliberately
+    NOT the module gate's fail-open one, even though "the node cannot run
+    this" sounds like the same availability concern:
+
+    - A misplaced module task wastes retry attempts and nothing else. A CUDA
+      job on a CPU-only box does not politely fail and requeue. It either
+      crashes on `torch.cuda.is_available()` or, worse, silently falls back
+      to the CPU and runs two orders of magnitude slower while reporting
+      success. The second outcome is not a failure anything here can detect;
+      it is a bill.
+    - The capability must be a genuine *list*, because its LENGTH is the
+      whole matching rule in v1. Absent, `None`, a bare string, a dict, or a
+      bare `int` count as NO GPUs. The bare `int` deserves naming: `1` reads
+      like "one GPU" and is exactly what a hand-written node view would put
+      there, but accepting it would mean a second, looser matching rule
+      beside the one `NodeCapabilities.gpus` actually feeds.
+    - `capabilities` itself may be absent or type-confused; that is read as
+      no GPUs rather than allowed to raise. `(node.get("capabilities") or
+      {}).get(...)` is NOT sufficient for this — a string capabilities value
+      has no `.get` and would crash the predicate.
+    - The requirement itself must be a non-negative `int`. Anything else
+      (`"1"`, `-1`, `1.5`, a list) makes the task ineligible everywhere
+      rather than crashing, exactly as a non-list `local_inputs` does.
+      **`bool` is a subclass of `int`**, so `True` is excluded explicitly: a
+      `gpus: true` typo must not silently mean "one GPU" and place real work.
+    - `gpus: 0` requires nothing and runs anywhere, exactly like tier
+      `standard` and an empty `local_inputs`.
+
+    The gate is ONE-DIRECTIONAL. A node with GPUs still receives CPU work;
+    reserving GPU hosts for GPU jobs is a scheduling optimisation and a
+    separate decision, and making it a gate here would idle the scarcest
+    hardware on the network. `allowFallback` does not waive this gate either
+    — hardware either exists on a host or it does not, and the submitter's
+    isolation posture has nothing to say about it.
+
     Everything genuinely standard keeps the fail-open placement default."""
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
@@ -199,6 +236,28 @@ class IsolationAwarePlacement(PlacementPolicy):
                 return False  # absent/None/type-confused capability ⇒ not capable
             if any(name not in advertised for name in local_inputs):
                 return False
+        # Fail-closed like the argv and local-data gates, and checked before
+        # the allowFallback waiver below for the same reason: a submitter
+        # cannot waive their way onto hardware a host does not have.
+        required_gpus = task.payload.get("gpus")
+        if required_gpus is not None:
+            # `bool` is a subclass of `int`: without the explicit exclusion,
+            # a `gpus: true` typo would read as "1 GPU" and place real work.
+            if (
+                not isinstance(required_gpus, int)
+                or isinstance(required_gpus, bool)
+                or required_gpus < 0
+            ):
+                return False  # type-confused requirement ⇒ fail closed, no crash
+            if required_gpus > 0:
+                capabilities = node.get("capabilities")
+                # isinstance, not `or {}` — a string capabilities value has no
+                # `.get` and must fail closed rather than crash the predicate.
+                advertised = (
+                    capabilities.get("gpus") if isinstance(capabilities, dict) else None
+                )
+                if not isinstance(advertised, list) or len(advertised) < required_gpus:
+                    return False  # absent/short/type-confused ⇒ not capable
         isolation = task.payload.get("isolation")
         if isolation is None:
             return True  # no isolation payload ⇒ standard, runs anywhere
