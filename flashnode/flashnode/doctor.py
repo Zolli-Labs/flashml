@@ -29,13 +29,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from flashnode.executor.hardening import CONTAINER_WORKDIR, _bind_mount_source
+from flashnode.executor.hardening import (
+    CONTAINER_WORKDIR,
+    _bind_mount_source,
+    harden_args,
+)
 
 __all__ = [
     "PROBE_IMAGE",
     "CheckResult",
     "check_cli_on_path",
     "check_engine",
+    "check_hardened_run",
     "check_pull",
     "check_workdir_mount",
     "default_workdir",
@@ -236,6 +241,60 @@ def check_workdir_mount(
                        fix=_mount_failure_fix(err))
 
 
+def check_hardened_run(
+    run: CommandRunner, workdir: Path, image: str = PROBE_IMAGE
+) -> CheckResult:
+    """The same probe as check 4, with the REAL sandbox flags.
+
+    Check 4 uses the minimum that can work; this uses everything a task
+    gets. So 4 passing and 5 failing localises the fault to a hardening
+    flag, with no stderr pattern-matching — and on Windows this is the first
+    thing in the system that has ever EXECUTED the platform-conditional
+    --user path from Plan 6, which until now was only argv-verified.
+    """
+    name = "a hardened container runs"
+    probe = Path(workdir) / PROBE_FILENAME
+    try:
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        probe.write_text(PROBE_CONTENT)
+    except OSError as exc:
+        return CheckResult(name, "fail", detail=f"{workdir}: {exc}",
+                           fix="Set FLASHNODE_WORKDIR to a writable path.")
+    try:
+        flags = harden_args(Path(workdir), cpus=1.0, memory_gb=1.0)
+    except (RuntimeError, ValueError) as exc:
+        probe.unlink(missing_ok=True)
+        return CheckResult(
+            name, "fail", detail=str(exc),
+            fix="This platform is not one the sandbox can secure. Report "
+                "it — running your machine unprivileged-in-name-only is not "
+                "something we will do.",
+        )
+    argv = [
+        "docker", "run", "--rm", "--pull=never", *flags, image,
+        "python", "-c",
+        f"print(open('{CONTAINER_WORKDIR}/{PROBE_FILENAME}').read(), end='')",
+    ]
+    try:
+        proc = run(argv, timeout=120.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return CheckResult(name, "fail", detail=str(exc),
+                           fix=_mount_failure_fix(str(exc)))
+    finally:
+        probe.unlink(missing_ok=True)
+    if proc.returncode == 0 and _text(proc.stdout) == PROBE_CONTENT:
+        return CheckResult(name, "ok", detail="sandbox flags accepted")
+    err = _text(proc.stderr) or _text(proc.stdout) or "the container read nothing back"
+    if "No such image" in err:
+        return CheckResult(name, "fail", detail=err, fix=_mount_failure_fix(err))
+    return CheckResult(
+        name, "fail", detail=err,
+        fix="The workdir mounts (check above passed) but your Docker "
+            "rejected one of the sandbox flags. Please report this output — "
+            "we will not loosen the sandbox to work around it.",
+    )
+
+
 def run_checks(
     *,
     pull: bool,
@@ -265,6 +324,11 @@ def run_checks(
             return results
     base = workdir if workdir is not None else default_workdir()
     results.append(check_workdir_mount(run, base))
+    if results[-1].status != "ok":
+        results.append(CheckResult("a hardened container runs", "skip",
+                                   detail="needs the workdir mount above"))
+        return results
+    results.append(check_hardened_run(run, base))
     return results
 
 

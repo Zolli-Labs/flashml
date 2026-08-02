@@ -17,6 +17,7 @@ from flashnode.doctor import (
     CheckResult,
     check_cli_on_path,
     check_engine,
+    check_hardened_run,
     check_pull,
     check_workdir_mount,
     default_workdir,
@@ -233,3 +234,57 @@ def test_default_workdir_falls_back_to_the_system_temp_dir(monkeypatch):
     so the doctor fails on exactly the machines the agent would."""
     monkeypatch.delenv("FLASHNODE_WORKDIR", raising=False)
     assert default_workdir() == Path(tempfile.gettempdir())
+
+
+def test_hardened_run_passes_when_the_probe_reads_back(tmp_path):
+    result = check_hardened_run(_runner(_proc(0, stdout="flashnode-doctor")), tmp_path)
+    assert result.status == "ok"
+
+
+def test_hardened_run_carries_the_real_sandbox_flags(tmp_path):
+    """Not a re-implementation of harden_args — the real one, so a change
+    there is exercised here rather than drifting silently."""
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return _proc(0, stdout="flashnode-doctor")
+
+    check_hardened_run(run, tmp_path)
+    argv = seen["argv"]
+    assert "--network" in argv and "none" in argv
+    assert "--read-only" in argv
+    assert "--cap-drop=ALL" in argv
+    assert "--security-opt=no-new-privileges" in argv
+    assert "--pull=never" in argv
+
+
+def test_hardened_run_fails_on_a_rejected_flag_and_blames_the_flags(tmp_path):
+    result = check_hardened_run(
+        _runner(_proc(125, stderr="docker: Error response from daemon: "
+                                  "invalid argument for --pids-limit")),
+        tmp_path,
+    )
+    assert result.status == "fail"
+    assert "--pids-limit" in result.detail
+    assert "report" in result.fix.lower()
+
+
+def test_hardened_run_fails_when_the_user_flag_cannot_be_built(tmp_path, monkeypatch):
+    """_user_flag raises on a platform with no getuid and not win32 — a
+    refusal to run unprivileged-in-name-only. The doctor must report that,
+    not crash."""
+    import flashnode.doctor as doctor_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("cannot determine a safe --user for platform 'sunos5'")
+
+    monkeypatch.setattr(doctor_mod, "harden_args", boom)
+    result = check_hardened_run(_runner(_proc(0)), tmp_path)
+    assert result.status == "fail"
+    assert "safe --user" in result.detail
+
+
+def test_hardened_run_cleans_up_its_probe_file(tmp_path):
+    check_hardened_run(_runner(_proc(0, stdout="flashnode-doctor")), tmp_path)
+    assert not (tmp_path / "flashnode-doctor-probe.txt").exists()
