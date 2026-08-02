@@ -20,20 +20,38 @@
 #
 # WHY THIS WORKFLOW LIVES IN THE PUBLIC REPO (moved 2026-08-01).
 #
-# GHCR gives a package the visibility of the repository that CREATES it, so
-# these built from the private flashml-cloud came out private — and every
-# volunteer's pull failed with an authentication error that looks nothing
-# like "this package is private". Publishing from a public repo makes public
-# the default instead of a manual toggle somebody has to remember for every
-# new image.
+# Not for visibility — that was a wrong guess, corrected here after testing
+# it. GHCR container packages are created PRIVATE **always**, whatever the
+# visibility of the repo that publishes them. Moving the build here did not
+# change that, and a fresh publish from this public repo produced private
+# packages exactly as before.
 #
-# It is also the coherent arrangement: flashnode is public and trusts the
-# `ghcr.io/zolli-labs/flashml-` prefix by default, so the people being asked
-# to run these images can now read the Dockerfiles that produced them.
+# The move is still right, for two reasons that do hold:
+#   * flashnode is PUBLIC and trusts the `ghcr.io/zolli-labs/flashml-` prefix
+#     by default. The people being asked to run these images on their own
+#     laptops can now read the Dockerfiles that produced them, in the same
+#     repo as the agent that pulls them.
+#   * It is where new images belong as the set grows — JAX, transformers, a
+#     GPU build — each a Dockerfile here, picked up by every host through the
+#     existing prefix allowlist with no change on any machine.
 #
-# NOTE: visibility is fixed at package CREATION. An image that already exists
-# as private stays private no matter where later pushes come from — it has to
-# be deleted (or flipped by hand) once, and is then recreated public here.
+# ===========================================================================
+# MANUAL STEP, STILL REQUIRED, AFTER ANY *NEW* IMAGE IS PUBLISHED FIRST TIME:
+#
+#   github.com/orgs/Zolli-Labs/packages -> <package> -> Package settings
+#     -> Danger Zone -> Change visibility -> Public
+#
+# GitHub exposes no REST endpoint for package visibility, so this cannot be
+# automated from here. Until it is done, every volunteer's `docker pull`
+# fails with a 401 that looks nothing like "this package is private", and the
+# job dies on their machine after signup, install and enrolment all appeared
+# to work.
+#
+# It is NOT left to memory: flashml-cloud's
+# tests/test_images.py::test_every_curated_image_is_anonymously_pullable asks
+# GHCR for an anonymous token for every reference the API can emit, and fails
+# naming the ones a stranger cannot reach. Run it after publishing.
+# ===========================================================================
 name: curated images
 
 on:
