@@ -76,6 +76,10 @@ class ArgvDockerRunner:
                 # here (before any subprocess) if this host does not lend them
                 # — see hardening.local_data_mounts.
                 local_inputs=payload.get("local_inputs"),
+                # The device count the job asked for. Absent for every job
+                # that does not ask, and validated in hardening.gpu_flags
+                # rather than here, so both runners cannot drift on it.
+                gpus=payload.get("gpus"),
             ),
             *env_args,
             image,          # argv follows the image, where docker treats it

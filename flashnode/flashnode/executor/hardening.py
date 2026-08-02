@@ -183,6 +183,30 @@ def local_data_mounts(
     return args
 
 
+def gpu_flags(gpus: object) -> list[str]:
+    """`--gpus N`, or nothing at all.
+
+    Every other flag in this module NARROWS what a container may touch.
+    This one widens it — it hands a device on someone else's machine to a
+    stranger's code — so it is absent unless the payload asked, and the ask
+    has to be a plain positive integer.
+
+    Anything else emits nothing rather than raising. The coordinator's
+    placement gate already refused a task whose `gpus` was not a positive
+    int, so a bad value arriving here means gate and payload disagree; this
+    is the second lock, not the validation. Two values are worth naming:
+
+    - `True`. `bool` is an `int` subclass, so a naive check reads it as
+      "1 GPU" — and `--gpus True` is not something docker accepts anyway.
+    - `"all"`. This is *valid* docker syntax meaning every device on the
+      host, which is exactly why an untrusted string must never reach the
+      flag. A task asks for a count; it does not get to name a device.
+    """
+    if isinstance(gpus, bool) or not isinstance(gpus, int) or gpus <= 0:
+        return []
+    return ["--gpus", str(gpus)]
+
+
 def harden_args(
     workdir: Path,
     *,
@@ -191,6 +215,7 @@ def harden_args(
     pids_limit: int = 512,
     local_inputs: object = None,
     local_data: dict[str, str] | None = None,
+    gpus: object = None,
 ) -> list[str]:
     """Docker flags common to every sandboxed task.
 
@@ -199,6 +224,11 @@ def harden_args(
     byte-for-byte what they were before the feature existed). `local_data` is
     the host owner's label→path map; it defaults to their environment, so a
     runner never has to know where the map comes from.
+
+    `gpus` is the payload's device count, straight from the wire and
+    therefore typed `object` — None for every job that exists today, and
+    then, as with `local_inputs`, the flag list is byte-for-byte what it was
+    before this argument existed. `doctor.check_hardened_run` passes neither.
     """
     return [
         # the job never reaches the volunteer's LAN or the internet; the
@@ -215,6 +245,9 @@ def harden_args(
         # bypassable by swapping
         "--memory", f"{memory_gb}g",
         "--memory-swap", f"{memory_gb}g",
+        # With the other resource caps, and absent entirely for the job that
+        # asked for no device — which is every job that exists today.
+        *gpu_flags(gpus),
         "--ulimit", "nofile=1024:1024",
         "-v", f"{_bind_mount_source(workdir)}:{CONTAINER_WORKDIR}",
         # After the workdir mount, never before: these land *inside* it, at

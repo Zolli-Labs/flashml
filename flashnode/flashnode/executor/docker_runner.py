@@ -80,6 +80,11 @@ class DockerRunner:
                 # See hardening.local_data_mounts: read-only, only what the
                 # payload named, and a refusal if this host does not lend it.
                 local_inputs=payload.get("local_inputs"),
+                # The device count the job asked for — see
+                # hardening.gpu_flags. Both runners forward this; a runner
+                # that quietly does not is a GPU job silently running on the
+                # CPU, which still succeeds and so tells nobody.
+                gpus=payload.get("gpus"),
             ),
             image,
             "python", "-m", module,
