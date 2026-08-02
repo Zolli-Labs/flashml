@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashnode"
-# 0.2.0 was the first published release; 0.1.0 never reached PyPI. 0.2.1 fixes
-# a hardcoded __version__ in flashnode/__init__.py that 0.2.0 shipped as
-# "0.1.0" — so every agent registered with the coordinator under the wrong
-# agent_version. Released from the Zolli-Labs/flashml monorepo by pushing a
-# `flashnode-vX.Y.Z` tag, and only AFTER the flashruntime floor below is on PyPI.
-version = "0.2.1"
+# 0.3.0 lends a host directory to tasks by label (FLASHNODE_LOCAL_DATA), which
+# needs flashruntime 0.4's NodeRegistration.local_datasets to advertise what
+# this host can serve. (0.2.0 was the first published release; 0.2.1 fixed a
+# hardcoded __version__ that made every agent register as 0.1.0.) Released from
+# the Zolli-Labs/flashml monorepo by pushing a `flashnode-vX.Y.Z` tag, and only
+# AFTER the flashruntime floor below is on PyPI.
+version = "0.3.0"
 description = "Open host agent for the FlashML fragmented-compute network: join, benchmark, execute sandboxed ML tasks, earn contribution credits."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -21,12 +22,14 @@ dependencies = [
     # coordinator's fail-open module gate happens to tolerate that, but
     # argv_capable's fail-closed gate does not.
     #
-    # Raised to >=0.3,<0.4 for the first published release. 0.3.0 is the first
-    # flashruntime that exists on PyPI at all, so any lower floor names
-    # something a volunteer cannot install. The upper bound is deliberate: this
-    # agent runs on machines we cannot reach, so it must never be silently
-    # upgraded across a protocol-breaking runtime release.
-    "flashruntime>=0.3,<0.4",
+    # Raised to >=0.4,<0.5: this agent advertises local_datasets, which only
+    # exists from flashruntime 0.4. On 0.3 pydantic silently ignores the extra
+    # kwarg, so the host would advertise nothing and the coordinator's gate
+    # would simply never place local-data work on it — fail-closed, but
+    # INVISIBLY, which is the worst way for a floor to be wrong. The upper
+    # bound is deliberate: this agent runs on machines we cannot reach, so it
+    # must never be silently upgraded across a protocol-breaking release.
+    "flashruntime>=0.4,<0.5",
     "psutil>=5.9",
     "websockets>=12",
     "cryptography>=42",
