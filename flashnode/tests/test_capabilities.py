@@ -108,3 +108,22 @@ def test_env_and_label_sandbox_capable_still_work_without_argv(monkeypatch):
     node_meta = {"metadata": {"labels": {"flashml.dev/sandbox-capable": "true"}}}
     reg = discover("node-1", kubernetes_node="", node_meta=node_meta, argv_capable=False)
     assert reg.sandbox_capable is True
+
+
+def test_registration_reports_the_installed_version():
+    """The coordinator's `agent_version` must be what is actually installed.
+
+    It was a hardcoded literal in flashnode/__init__.py, and it drifted the
+    first time it mattered: 0.2.0 shipped to PyPI while the literal still read
+    0.1.0, so every agent in the fleet would have registered as 0.1.0 no matter
+    what its owner had installed. Any version-based decision the coordinator
+    makes — refusing a too-old protocol, reporting upgrade coverage — would
+    have been reading a constant.
+
+    Compare against installed metadata rather than a literal here, or this
+    test becomes the third source of truth it exists to prevent.
+    """
+    from importlib.metadata import version
+
+    reg = discover("n-test", kubernetes_node="", node_meta=None)
+    assert reg.agent_version == version("flashnode")

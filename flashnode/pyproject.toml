@@ -4,10 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashnode"
-# 0.2.0 is the FIRST published release; 0.1.0 never reached PyPI. Released from
-# the Zolli-Labs/flashml monorepo by pushing a `flashnode-v0.2.0` tag, and only
-# AFTER flashruntime 0.3.0 is on PyPI — see the floor below.
-version = "0.2.0"
+# 0.2.0 was the first published release; 0.1.0 never reached PyPI. 0.2.1 fixes
+# a hardcoded __version__ in flashnode/__init__.py that 0.2.0 shipped as
+# "0.1.0" — so every agent registered with the coordinator under the wrong
+# agent_version. Released from the Zolli-Labs/flashml monorepo by pushing a
+# `flashnode-vX.Y.Z` tag, and only AFTER the flashruntime floor below is on PyPI.
+version = "0.2.1"
 description = "Open host agent for the FlashML fragmented-compute network: join, benchmark, execute sandboxed ML tasks, earn contribution credits."
 readme = "README.md"
 license = { text = "Apache-2.0" }
