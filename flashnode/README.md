@@ -48,6 +48,27 @@ image pull — a registry blip should not stop an agent whose images are
 already cached — and refuses to start if anything fails, because a host that
 cannot run tasks should not be claiming them.
 
+## While it runs
+
+On a terminal you get a live status block:
+
+```
+flashnode 0.3.2 · flashml-api.onrender.com · up 2h14m
+  running    fed-2e2d4d6ab57f  ·  attempt 1  ·  38s
+  session    12 accepted   0 failed
+  heartbeat  2s ago
+```
+
+`waiting · no work queued — this is normal` means exactly that: the pool has
+nothing for you right now, and your machine is fine. Pipe the output
+anywhere, or pass `--log-json`, and you get the machine-readable log instead.
+
+If three tasks in a row fail **on your machine**, the agent re-runs its own
+checks. Pass, and the jobs were broken rather than your host, so it carries
+on. Fail, and it stops claiming and tells you what to fix — instead of
+burning a job's retries on a machine that cannot run anything.
+`--max-consecutive-failures 0` turns that off.
+
 ## What it does today
 
 ```bash
