@@ -1,0 +1,147 @@
+# Build and publish the curated task images.
+#
+# These are the images volunteers' machines pull and run submitted code
+# inside. A host never builds anything: it pulls a reference the cloud API
+# named, which is the only reason "donate a machine" is a one-command setup
+# rather than a Docker tutorial.
+#
+# THE TAG IS IMMUTABLE. Bump IMAGE_TAG for every change; never repush an
+# existing one. Two things depend on that:
+#   * `docker run` serves a locally cached image when the tag string is
+#     unchanged, so a repushed tag reaches exactly the hosts that have never
+#     pulled it and silently skips everyone else — the worst possible
+#     distribution of "did this machine get the fix?".
+#   * flashml-cloud's apps/api/flashml_cloud_api/images.py (PRIVATE repo)
+#     pins these exact strings, and
+#     preflight validates a user's imports against the manifest for THAT
+#     version. A tag whose contents changed invalidates that guarantee.
+# The `refuse to overwrite` step below enforces this rather than trusting
+# anyone to have read this comment.
+#
+# WHY THIS WORKFLOW LIVES IN THE PUBLIC REPO (moved 2026-08-01).
+#
+# GHCR gives a package the visibility of the repository that CREATES it, so
+# these built from the private flashml-cloud came out private — and every
+# volunteer's pull failed with an authentication error that looks nothing
+# like "this package is private". Publishing from a public repo makes public
+# the default instead of a manual toggle somebody has to remember for every
+# new image.
+#
+# It is also the coherent arrangement: flashnode is public and trusts the
+# `ghcr.io/zolli-labs/flashml-` prefix by default, so the people being asked
+# to run these images can now read the Dockerfiles that produced them.
+#
+# NOTE: visibility is fixed at package CREATION. An image that already exists
+# as private stays private no matter where later pushes come from — it has to
+# be deleted (or flipped by hand) once, and is then recreated public here.
+name: curated images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "images/**"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+
+env:
+  # Must equal IMAGE_TAG in flashml-cloud's apps/api/flashml_cloud_api/
+  # images.py. The two repos cannot import each other, so that agreement is
+  # checked where it actually matters: flashml-cloud's test_images.py asserts
+  # every reference the API can emit is ANONYMOUSLY pullable from GHCR. A tag
+  # bumped here and not there fails that test, and so does an image that is
+  # published but unreachable — which a string comparison between two files
+  # could never catch, and did not.
+  IMAGE_TAG: "2026.08.1"
+  REGISTRY: ghcr.io
+  NAMESPACE: zolli-labs
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      # Independent images: one failing must not cancel the other two, or a
+      # transient registry error looks like a broken Dockerfile.
+      fail-fast: false
+      matrix:
+        alias: [python-slim, sklearn, pytorch-cpu]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite an existing tag
+        run: |
+          ref="${REGISTRY}/${NAMESPACE}/flashml-${{ matrix.alias }}:${IMAGE_TAG}"
+          if docker manifest inspect "$ref" >/dev/null 2>&1; then
+            echo "::error::$ref already exists. Tags are immutable — bump"
+            echo "::error::IMAGE_TAG in this workflow AND in images.py."
+            exit 1
+          fi
+          echo "$ref is free"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: images/${{ matrix.alias }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/flashml-${{ matrix.alias }}:${{ env.IMAGE_TAG }}
+          # Attestation manifests confuse older Docker clients into pulling
+          # the wrong platform entry. Volunteers run whatever Docker Desktop
+          # they happen to have, so keep the manifest boring.
+          provenance: false
+
+      - name: Verify the published image runs as uid 10001
+        # The whole point of these images. flashnode omits `--user` on
+        # Windows (Docker Desktop cannot map host uids) and relies solely on
+        # the image's declared USER; if that is root, every Windows volunteer
+        # runs submitted code as container root. Asserting it on the PUSHED
+        # image, not the built one, is deliberate — this is what a host gets.
+        run: |
+          ref="${REGISTRY}/${NAMESPACE}/flashml-${{ matrix.alias }}:${IMAGE_TAG}"
+          docker pull "$ref"
+          uid=$(docker run --rm --entrypoint id "$ref" -u)
+          gid=$(docker run --rm --entrypoint id "$ref" -g)
+          echo "uid=$uid gid=$gid"
+          if [ "$uid" != "10001" ] || [ "$gid" != "10001" ]; then
+            echo "::error::$ref runs as ${uid}:${gid}, expected 10001:10001"
+            exit 1
+          fi
+
+      - name: Verify the declared packages are importable
+        # images.py tells preflight what each image provides. If that set is
+        # a lie, preflight either rejects code that would have run or accepts
+        # code that crashes on a stranger's laptop 40 minutes in.
+        run: |
+          ref="${REGISTRY}/${NAMESPACE}/flashml-${{ matrix.alias }}:${IMAGE_TAG}"
+          case "${{ matrix.alias }}" in
+            python-slim) mods="json os sys" ;;
+            sklearn)     mods="numpy pandas sklearn scipy joblib threadpoolctl" ;;
+            pytorch-cpu) mods="torch numpy" ;;
+          esac
+          for m in $mods; do
+            docker run --rm "$ref" python -c "import $m" \
+              || { echo "::error::$ref cannot import $m"; exit 1; }
+          done
+          echo "all declared packages import cleanly"
+
+      - name: Report the digest
+        # Recorded so a later change can pin by digest instead of tag
+        # (M1_DECISIONS.md D16 defers that to M2).
+        run: |
+          ref="${REGISTRY}/${NAMESPACE}/flashml-${{ matrix.alias }}:${IMAGE_TAG}"
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$ref")
+          echo "### \`${{ matrix.alias }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$digest\`" >> "$GITHUB_STEP_SUMMARY"
