@@ -143,6 +143,35 @@ class IsolationAwarePlacement(PlacementPolicy):
     cut every already-deployed node off from module work the moment this
     field shipped, without anyone having opted out of anything.
 
+    A fourth gate applies to tasks whose payload lists `local_inputs` (data
+    the host holds and never uploads): the claiming node must advertise
+    EVERY one of those names in its `local_datasets` capability. It shares
+    the argv gate's fail-closed polarity, not the module gate's, because
+    the host's data is the thing being protected — an absent, `None`, or
+    wrongly-typed capability counts as NOT capable:
+
+    - The capability must be a genuine *list* of names. A bare string does
+      not count, even when it looks right: ``"patients" in "patients"`` is
+      True in Python, so accepting a string would let a node advertise
+      every dataset whose name is a substring of anything it said. That is
+      the same class of type confusion `sandbox_capable is True` avoids
+      for booleans.
+    - The requirement itself must be a list. A `local_inputs` payload that
+      is present but not a list (e.g. the bare string ``"patients"``) makes
+      the task ineligible everywhere — fail closed without crashing the
+      predicate, exactly as a non-dict isolation payload does.
+    - An empty `local_inputs` requires nothing and so runs anywhere, like
+      tier ``"standard"``.
+
+    The `allowFallback` waiver does NOT apply here, for the same reason it
+    does not waive the argv gate: it waives the sandbox *tier* requirement
+    and nothing else. A waiver is the submitter's statement about their own
+    isolation posture; the local-data gate protects the HOST's data, which
+    the submitter has no standing to waive. A task placed on a node that
+    never advertised the dataset would fail on the agent anyway (the label
+    is not in its map) — failing closed here makes it fail before anything
+    touches the data, and before an attempt is burned.
+
     Everything genuinely standard keeps the fail-open placement default."""
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
@@ -158,6 +187,18 @@ class IsolationAwarePlacement(PlacementPolicy):
         # into the same node's path until attempts are exhausted.
         if "module" in task.payload and node.get("module_capable") is False:
             return False
+        # Fail-closed like the argv gate, and checked before the allowFallback
+        # waiver below for the same reason: the waiver covers the sandbox tier
+        # only, and a submitter cannot waive their way onto a host's data.
+        local_inputs = task.payload.get("local_inputs")
+        if local_inputs is not None:
+            if not isinstance(local_inputs, list):
+                return False  # type-confused requirement ⇒ fail closed, no crash
+            advertised = node.get("local_datasets")
+            if local_inputs and not isinstance(advertised, list):
+                return False  # absent/None/type-confused capability ⇒ not capable
+            if any(name not in advertised for name in local_inputs):
+                return False
         isolation = task.payload.get("isolation")
         if isolation is None:
             return True  # no isolation payload ⇒ standard, runs anywhere

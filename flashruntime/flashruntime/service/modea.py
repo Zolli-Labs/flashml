@@ -643,6 +643,9 @@ def build_router(state: ModeAState) -> APIRouter:
             "sandbox_capable": entry.registration.sandbox_capable,
             "argv_capable": entry.registration.argv_capable,
             "module_capable": entry.registration.module_capable,
+            # Names only — the host paths behind them never reach us, and the
+            # placement gate needs the names to place local-data work at all.
+            "local_datasets": entry.registration.local_datasets,
             "capabilities": entry.registration.capabilities.model_dump(),
         }
         lease = manager.claim(
