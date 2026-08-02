@@ -69,3 +69,28 @@ def test_work_runs_no_doctor_for_the_subprocess_tier(monkeypatch):
     with pytest.raises(_Reached):
         _work(["--runner", "subprocess", "--coordinator", "http://127.0.0.1:1"])
     assert called == []
+
+
+def test_work_still_starts_on_a_host_with_no_gpu(monkeypatch):
+    """The seventh check is NON-GATING, and this is the test that says so.
+
+    Most volunteers have no GPU. A GPU check that blocked `work` the way the
+    other six do would lock the entire existing fleet out of the network the
+    moment they upgraded — every one of them still perfectly able to run the
+    CPU work they signed up for.
+    """
+    monkeypatch.setattr(
+        "flashnode.doctor.run_checks",
+        lambda **kw: [
+            CheckResult("docker CLI on PATH", "ok"),
+            CheckResult("GPU devices", "info", detail="no GPU detected",
+                        fix="Install the NVIDIA driver."),
+        ],
+    )
+
+    def stop_here(*a, **k):
+        raise _Reached
+
+    monkeypatch.setattr("flashnode.identity.store.load_or_create_node_id", stop_here)
+    with pytest.raises(_Reached):
+        _work(["--runner", "docker", "--coordinator", "http://127.0.0.1:1"])

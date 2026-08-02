@@ -214,10 +214,18 @@ def _work(args: list[str]) -> int:
         # someone else's machine, and a transient registry blip must not
         # stop one whose images are already cached. `flashnode doctor` does
         # the pull.
-        from flashnode.doctor import format_results, run_checks
+        #
+        # The gate reads doctor's own NON_BLOCKING_STATUSES rather than
+        # testing `!= "ok"` here. Not every check is a gate: the GPU check is
+        # informational, because most volunteers have no GPU and blocking on
+        # it would lock the entire existing fleet out of CPU work the moment
+        # they upgraded. Keeping the predicate in one place is what stops
+        # `flashnode work` and `flashnode doctor` disagreeing about which
+        # verdicts are fatal.
+        from flashnode.doctor import NON_BLOCKING_STATUSES, format_results, run_checks
 
         results = run_checks(pull=False)
-        if any(r.status != "ok" for r in results):
+        if any(r.status not in NON_BLOCKING_STATUSES for r in results):
             print(
                 f"flashnode work: this machine cannot run tasks with "
                 f"--runner {opts.runner}.\n" + format_results(results)

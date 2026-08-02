@@ -34,12 +34,15 @@ from flashnode.executor.hardening import (
     _bind_mount_source,
     harden_args,
 )
+from flashnode.inventory.gpu import probe_gpus
 
 __all__ = [
+    "NON_BLOCKING_STATUSES",
     "PROBE_IMAGE",
     "CheckResult",
     "check_cli_on_path",
     "check_engine",
+    "check_gpus",
     "check_hardened_run",
     "check_local_datasets",
     "check_pull",
@@ -61,6 +64,21 @@ PROBE_IMAGE = "ghcr.io/zolli-labs/flashml-python-slim:2026.08.1"
 
 CommandRunner = Callable[..., subprocess.CompletedProcess]
 
+#: Statuses that do NOT stop a host from working. Everything else does, and
+#: an unrecognised status counts as blocking — this is the certification
+#: predicate, so it fails closed (see `exit_code`).
+#:
+#: The set exists because "info" does. Six of the seven checks answer "can
+#: this machine run a task at all", and blocking is the only correct answer
+#: when one of them fails. The GPU check answers something else — "is the
+#: hardware you think you contributed actually visible" — and most volunteers
+#: have no GPU and must keep taking CPU work. Blocking on that would lock the
+#: entire existing fleet out of the network on upgrade.
+#:
+#: `flashnode work` reads THIS set rather than testing `!= "ok"` itself, so
+#: the gate cannot drift from the exit code.
+NON_BLOCKING_STATUSES = frozenset({"ok", "info"})
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -71,7 +89,7 @@ class CheckResult:
     """
 
     name: str
-    status: str  # "ok" | "fail" | "skip"
+    status: str  # "ok" | "fail" | "skip" | "info" (see NON_BLOCKING_STATUSES)
     detail: str = ""
     fix: str = ""
 
@@ -353,6 +371,44 @@ def check_local_datasets(raw: str | None = None) -> CheckResult:
     return CheckResult(name, "ok", detail=", ".join(sorted(mapping)))
 
 
+def check_gpus(probe: Callable[[], list] | None = None) -> CheckResult:
+    """What this host will advertise as GPUs — and NOTHING is a fine answer.
+
+    The only non-gating check in this module (spec §8). It never returns
+    "fail": a host with no GPU is the normal host, and the CPU work they
+    signed up for is unaffected. It exists for the other case — a host who
+    BELIEVES they contributed a GPU learning here that the agent cannot see
+    it, rather than wondering why no GPU job ever arrives. That is exactly
+    the class of silent failure `doctor` was written for.
+
+    It reports the same probe `discover()` advertises, not `nvidia-smi`
+    directly. A doctor that consults a different source than the agent is a
+    doctor that can pass while the agent registers `[]`.
+    """
+    name = "GPU devices"
+    probe = probe or probe_gpus
+    try:
+        gpus = list(probe())
+    except Exception as exc:  # noqa: BLE001
+        # probe_gpus already promises this cannot happen. If it ever does,
+        # a diagnostic that crashes has diagnosed nothing — and crashing on
+        # the one check that was never allowed to block would be perverse.
+        return CheckResult(name, "info", detail=f"could not probe for GPUs: {exc}")
+    if not gpus:
+        return CheckResult(
+            name, "info",
+            detail="no GPU detected — this host will take CPU work only",
+            fix="Nothing to do unless you expected a GPU here. If you did: "
+                "check `nvidia-smi` runs in this terminal, and install the "
+                "NVIDIA Container Toolkit so containers can see the device.",
+        )
+    lines = [f"{len(gpus)} GPU{'s' if len(gpus) != 1 else ''}"]
+    for gpu in gpus:
+        memory = f", {gpu.memory_total_mb} MiB" if gpu.memory_total_mb else ""
+        lines.append(f"{gpu.index}: {gpu.name or 'unnamed device'}{memory}")
+    return CheckResult(name, "ok", detail="\n".join(lines))
+
+
 def run_checks(
     *,
     pull: bool,
@@ -360,6 +416,7 @@ def run_checks(
     which: Callable[[str], str | None] | None = None,
     workdir: Path | None = None,
     raw_local_data: str | None = None,
+    gpu_probe: Callable[[], list] | None = None,
 ) -> list[CheckResult]:
     """Run every check, in order, skipping what a prior failure makes
     meaningless.
@@ -396,13 +453,18 @@ def run_checks(
         if results[-1].status != "ok":
             stopped = True
     results.append(check_local_datasets(raw=raw_local_data))
+    # Neither of the last two depends on Docker, so neither is skipped by a
+    # failure above: a host debugging their engine should still learn that
+    # their local-data label is a typo and that their GPU is invisible.
+    results.append(check_gpus(probe=gpu_probe))
     return results
 
 
 def format_results(results: Sequence[CheckResult]) -> str:
     lines = []
     for r in results:
-        tag = {"ok": "[ok]  ", "fail": "[FAIL]", "skip": "[skip]"}[r.status]
+        tag = {"ok": "[ok]  ", "fail": "[FAIL]", "skip": "[skip]",
+               "info": "[info]"}.get(r.status, "[????]")
         head = r.detail.splitlines()[0] if r.detail else ""
         lines.append(f"  {tag} {r.name:<30} {head}".rstrip())
         for extra in r.detail.splitlines()[1:]:
@@ -429,8 +491,14 @@ def format_results(results: Sequence[CheckResult]) -> str:
 def exit_code(results: Sequence[CheckResult]) -> int:
     """Skipped counts as not-passed. A host whose checks did not run has not
     been certified, and calling it healthy is the exact failure this command
-    removes."""
-    return 0 if all(r.status == "ok" for r in results) else 1
+    removes.
+
+    "info" does not count against a host — see NON_BLOCKING_STATUSES. The
+    membership test is deliberately the way round that makes an unknown
+    status BLOCK: a check whose verdict this function does not understand
+    has not certified anything.
+    """
+    return 0 if all(r.status in NON_BLOCKING_STATUSES for r in results) else 1
 
 
 def doctor_main(argv: list[str]) -> int:

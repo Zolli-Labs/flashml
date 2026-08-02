@@ -14,9 +14,11 @@ import tempfile
 from pathlib import Path
 
 from flashnode.doctor import (
+    NON_BLOCKING_STATUSES,
     CheckResult,
     check_cli_on_path,
     check_engine,
+    check_gpus,
     check_hardened_run,
     check_local_datasets,
     check_pull,
@@ -408,3 +410,105 @@ def test_run_checks_defaults_do_not_capture_run_command_at_import(monkeypatch):
     results = run_checks(pull=True, raw_local_data="")
     assert calls, "run_checks did not use the patched run_command"
     assert results[1].status == "fail"
+
+
+# -- check 7: GPUs, and the first NON-GATING check in this module -------------
+#
+# Every check before this one blocks: `exit_code` and the `flashnode work`
+# gate both treat anything that is not "ok" as a refusal, which is right for
+# six checks about whether this machine can run a task at all. It is wrong
+# for this one. Most volunteers have no GPU and must keep taking CPU work —
+# a gating GPU check would lock the entire existing fleet out of the network
+# on upgrade. So "info" exists: reported, never blocking.
+
+
+def test_the_gpu_check_reports_what_the_probe_found():
+    from flashruntime.protocol.v1alpha1 import GpuInfo
+
+    result = check_gpus(probe=lambda: [
+        GpuInfo(index=0, name="NVIDIA GeForce RTX 4090", memory_total_mb=24564),
+        GpuInfo(index=1, name="NVIDIA GeForce RTX 4090", memory_total_mb=24564),
+    ])
+    assert result.status == "ok"
+    assert "2" in result.detail
+    assert "RTX 4090" in result.detail
+
+
+def test_the_gpu_check_says_plainly_that_it_found_nothing():
+    result = check_gpus(probe=lambda: [])
+    assert result.status == "info"
+    assert "no GPU" in result.detail
+    # The point of the check, per spec §8: a host who BELIEVES they
+    # contributed a GPU finds out here that they did not.
+    assert result.fix
+
+
+def test_no_gpu_is_not_a_failure():
+    assert check_gpus(probe=lambda: []).status in NON_BLOCKING_STATUSES
+    assert exit_code([CheckResult("a", "ok"), check_gpus(probe=lambda: [])]) == 0
+
+
+def test_the_gpu_check_never_raises():
+    def boom():
+        raise RuntimeError("nvidia-smi went sideways")
+
+    result = check_gpus(probe=boom)
+    assert result.status in NON_BLOCKING_STATUSES
+
+
+def test_format_shows_an_info_line_and_calls_nothing_failed():
+    text = format_results([
+        CheckResult("docker CLI on PATH", "ok", detail="/usr/local/bin/docker"),
+        CheckResult("GPU devices", "info", detail="no GPU detected",
+                    fix="Install the NVIDIA driver."),
+    ])
+    assert "[info]" in text
+    assert "no GPU detected" in text
+    assert "failed" not in text
+
+
+def test_run_checks_includes_the_gpu_check_and_a_gpu_less_host_still_passes(tmp_path):
+    results = run_checks(
+        pull=False,
+        run=_runner(_proc(0, stdout="flashnode-doctor")),
+        which=lambda _: "/usr/local/bin/docker",
+        workdir=tmp_path,
+        raw_local_data="",
+        gpu_probe=lambda: [],
+    )
+    by_name = {r.name: r.status for r in results}
+    assert "GPU devices" in by_name
+    assert by_name["GPU devices"] == "info"
+    assert exit_code(results) == 0, format_results(results)
+
+
+def test_the_gpu_check_runs_even_when_docker_is_down():
+    """It has nothing to do with the engine, like the local-dataset check —
+    a host debugging Docker should still learn whether their GPU is seen."""
+    results = run_checks(
+        pull=True,
+        run=_runner(_proc(1, stderr=ENGINE_PING_500)),
+        which=lambda _: "/usr/local/bin/docker",
+        raw_local_data="",
+        gpu_probe=lambda: [],
+    )
+    by_name = {r.name: r.status for r in results}
+    assert by_name["GPU devices"] == "info"      # reported, not "skip"
+    assert exit_code(results) == 1               # the engine still fails it
+
+
+def test_run_checks_does_not_shell_out_to_nvidia_smi_by_default(monkeypatch):
+    """Same rule as `run` and `which`: resolved at call time, so the suite
+    never touches the machine's real driver state."""
+    calls = []
+    monkeypatch.setattr("flashnode.doctor.probe_gpus",
+                        lambda: calls.append(1) or [])
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    run_checks(pull=True, raw_local_data="")
+    assert calls, "run_checks did not use the patched probe_gpus"
+
+
+def test_an_unknown_status_still_blocks():
+    """`exit_code` widened from "everything ok" to "nothing blocking". It
+    must stay fail-closed: a status this module does not know is not a pass."""
+    assert exit_code([CheckResult("a", "ok"), CheckResult("b", "mystery")]) == 1
