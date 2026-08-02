@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashnode"
+version = "0.1.0"
+description = "Open host agent for the FlashML fragmented-compute network: join, benchmark, execute sandboxed ML tasks, earn contribution credits."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    # >=0.2: 0.1.0 predates NodeRegistration.module_capable — a volunteer on
+    # that wheel would register without the field, and the coordinator's
+    # fail-open module gate happens to tolerate that, but argv_capable's
+    # fail-closed gate does not: pin the floor where the wire fields this
+    # agent emits actually exist.
+    "flashruntime>=0.2",
+    "psutil>=5.9",
+    "websockets>=12",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+flashnode = "flashnode.agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Zolli-Labs/flashnode"
+
+[tool.setuptools.packages.find]
+include = ["flashnode*"]
+
+[tool.pytest.ini_options]
+# Unit tests run everywhere with zero infrastructure. Integration tests
+# (tests/integration/) need a real Docker daemon and are opt-in:
+# pytest -m integration
+addopts = "-m 'not integration'"
+markers = [
+    "integration: needs a real docker daemon; excluded by default, run with -m integration",
+]
