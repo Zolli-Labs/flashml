@@ -11,6 +11,7 @@ name: ci
 #   test            — the full flashruntime unit + e2e suite, every interpreter, both OSes
 #   docs            — the docs site builds and every internal link resolves
 #   bench-smoke     — the benchmark scenarios RUN (guards the harness, not numbers)
+#   image-dockerfiles — every curated image declares a non-root USER
 #   flashnode-test  — the agent suite, against flashruntime FROM THIS TREE
 on:
   push:
@@ -145,6 +146,28 @@ jobs:
         run: pytest -m bench_smoke
       - name: Smoke-run every scenario (1 repeat, non-representative)
         run: python -m benchmarks run --all --repeats 1 --smoke
+
+  image-dockerfiles:
+    # The curated images must each declare a numeric non-root USER as their
+    # last user-affecting instruction. flashnode omits `--user` on Windows
+    # (Docker Desktop cannot map host uids) and relies solely on the image's
+    # declared USER — so if that is root, every Windows volunteer runs
+    # submitted code as container root.
+    #
+    # Parses the Dockerfiles directly: no daemon, no build, runs everywhere.
+    # These tests moved here with the Dockerfiles from flashml-cloud, where
+    # nothing at this repo root would otherwise have run them.
+    name: image-dockerfiles (non-root USER)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: pip install pytest
+      - name: Check every curated image runs as non-root
+        run: pytest tests/ -q
 
   flashnode-test:
     # The agent suite, run against the flashruntime IN THIS TREE rather than a
