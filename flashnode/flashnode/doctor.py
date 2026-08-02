@@ -41,6 +41,7 @@ __all__ = [
     "check_cli_on_path",
     "check_engine",
     "check_hardened_run",
+    "check_local_datasets",
     "check_pull",
     "check_workdir_mount",
     "default_workdir",
@@ -295,12 +296,61 @@ def check_hardened_run(
     )
 
 
+def check_local_datasets(raw: str | None = None) -> CheckResult:
+    """Every label this host advertises must resolve to a readable directory.
+
+    parse_local_data checks the label charset, that the path is absolute,
+    that it carries no ':' that would re-read as a second mount, and that no
+    label is mapped twice. It never stats the path. So a typo advertises a
+    dataset this host cannot serve — and because the coordinator's
+    fail-closed placement gate trusts that advertisement, this host becomes
+    the ONLY one eligible for the job, and every retry comes back here.
+    """
+    from flashnode.config.local_data import (
+        LOCAL_DATA_ENV,
+        LocalDataError,
+        parse_local_data,
+    )
+
+    name = "local datasets readable"
+    value = os.environ.get(LOCAL_DATA_ENV) if raw is None else raw
+    try:
+        mapping = parse_local_data(value)
+    except LocalDataError as exc:
+        return CheckResult(
+            name, "fail", detail=str(exc),
+            fix=f"{LOCAL_DATA_ENV} must look like "
+                "label=/absolute/path,other=/absolute/path2. Fix it and "
+                "re-run `flashnode doctor`.",
+        )
+    if not mapping:
+        return CheckResult(name, "ok", detail="none configured")
+    problems = []
+    for label, path in sorted(mapping.items()):
+        p = Path(path)
+        if not p.exists():
+            problems.append(f"{label}: {path} does not exist")
+        elif not p.is_dir():
+            problems.append(f"{label}: {path} is not a directory")
+        elif not os.access(p, os.R_OK | os.X_OK):
+            problems.append(f"{label}: {path} is not readable")
+    if problems:
+        return CheckResult(
+            name, "fail", detail="\n".join(problems),
+            fix=f"Point {LOCAL_DATA_ENV} at directories that exist and are "
+                "readable, or remove the labels you cannot serve — the "
+                "coordinator sends local-data jobs ONLY to hosts advertising "
+                "them, so a bad label strands the job here.",
+        )
+    return CheckResult(name, "ok", detail=", ".join(sorted(mapping)))
+
+
 def run_checks(
     *,
     pull: bool,
     run: CommandRunner = run_command,
     which: Callable[[str], str | None] = shutil.which,
-    workdir=None,
+    workdir: Path | None = None,
     raw_local_data: str | None = None,
 ) -> list[CheckResult]:
     """Run every check, in order, skipping what a prior failure makes
@@ -310,25 +360,31 @@ def run_checks(
     daemon on someone else's machine, and a transient registry blip must not
     stop one whose images are already cached (spec §4.1).
     """
-    results = [check_cli_on_path(which=which)]
-    if results[-1].status != "ok":
-        return results
-    results.append(check_engine(run))
-    if results[-1].status != "ok":
-        return results
-    if pull:
-        results.append(check_pull(run))
-        if results[-1].status != "ok":
-            results.append(CheckResult("workdir bind-mounts", "skip",
-                                       detail="needs the image above"))
-            return results
     base = workdir if workdir is not None else default_workdir()
-    results.append(check_workdir_mount(run, base))
-    if results[-1].status != "ok":
-        results.append(CheckResult("a hardened container runs", "skip",
-                                   detail="needs the workdir mount above"))
-        return results
-    results.append(check_hardened_run(run, base))
+    # Every container-level check, in order, each paired with the callable
+    # that runs it. A failure skips the rest of THIS list; the local-dataset
+    # check is independent of Docker and always runs, after the loop.
+    staged: list[tuple[str, Callable[[], CheckResult]]] = [
+        ("docker CLI on PATH", lambda: check_cli_on_path(which=which)),
+        ("docker engine reachable", lambda: check_engine(run)),
+    ]
+    if pull:
+        staged.append(("pull a curated image", lambda: check_pull(run)))
+    staged += [
+        ("workdir bind-mounts", lambda: check_workdir_mount(run, base)),
+        ("a hardened container runs", lambda: check_hardened_run(run, base)),
+    ]
+
+    results: list[CheckResult] = []
+    stopped = False
+    for label, check in staged:
+        if stopped:
+            results.append(CheckResult(label, "skip", detail="needs the check above"))
+            continue
+        results.append(check())
+        if results[-1].status != "ok":
+            stopped = True
+    results.append(check_local_datasets(raw=raw_local_data))
     return results
 
 

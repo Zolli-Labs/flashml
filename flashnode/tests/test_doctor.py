@@ -18,11 +18,13 @@ from flashnode.doctor import (
     check_cli_on_path,
     check_engine,
     check_hardened_run,
+    check_local_datasets,
     check_pull,
     check_workdir_mount,
     default_workdir,
     exit_code,
     format_results,
+    run_checks,
 )
 
 # The Windows failure that stopped the 2026-08-02 run-through.
@@ -288,3 +290,89 @@ def test_hardened_run_fails_when_the_user_flag_cannot_be_built(tmp_path, monkeyp
 def test_hardened_run_cleans_up_its_probe_file(tmp_path):
     check_hardened_run(_runner(_proc(0, stdout="flashnode-doctor")), tmp_path)
     assert not (tmp_path / "flashnode-doctor-probe.txt").exists()
+
+
+def test_local_datasets_passes_when_none_are_configured():
+    result = check_local_datasets(raw="")
+    assert result.status == "ok"
+    assert "none" in result.detail.lower()
+
+
+def test_local_datasets_passes_for_a_readable_directory(tmp_path):
+    data = tmp_path / "patients"
+    data.mkdir()
+    result = check_local_datasets(raw=f"patients={data}")
+    assert result.status == "ok"
+    assert "patients" in result.detail
+
+
+def test_local_datasets_fails_on_a_path_that_does_not_exist_and_names_the_label(tmp_path):
+    """The typo case. It parses, it advertises, the placement gate believes
+    it, and every attempt routes back to this host."""
+    result = check_local_datasets(raw=f"patients={tmp_path / 'typo'}")
+    assert result.status == "fail"
+    assert "patients" in result.detail
+
+
+def test_local_datasets_fails_when_the_path_is_a_file_not_a_directory(tmp_path):
+    f = tmp_path / "patients.csv"
+    f.write_text("x")
+    result = check_local_datasets(raw=f"patients={f}")
+    assert result.status == "fail"
+    assert "directory" in result.detail.lower()
+
+
+def test_local_datasets_fails_on_an_unreadable_directory(tmp_path):
+    import os
+
+    import pytest as _pytest
+
+    if os.getuid() == 0:
+        _pytest.skip("root reads everything")
+    data = tmp_path / "locked"
+    data.mkdir(mode=0o000)
+    try:
+        result = check_local_datasets(raw=f"locked={data}")
+        assert result.status == "fail"
+    finally:
+        data.chmod(0o755)
+
+
+def test_local_datasets_reports_a_malformed_value_rather_than_raising():
+    result = check_local_datasets(raw="patients")  # no '=' at all
+    assert result.status == "fail"
+    assert "FLASHNODE_LOCAL_DATA" in result.fix
+
+
+def test_local_datasets_lists_every_bad_label_not_just_the_first(tmp_path):
+    result = check_local_datasets(raw=f"a={tmp_path/'x'},b={tmp_path/'y'}")
+    assert "a" in result.detail and "b" in result.detail
+
+
+def test_run_checks_skips_container_checks_when_the_engine_is_down_but_still_checks_datasets():
+    results = run_checks(
+        pull=True,
+        run=_runner(_proc(1, stderr=ENGINE_PING_500)),
+        which=lambda _: "/usr/local/bin/docker",
+        raw_local_data="",
+    )
+    by_name = {r.name: r.status for r in results}
+    assert by_name["docker engine reachable"] == "fail"
+    assert by_name["pull a curated image"] == "skip"
+    assert by_name["a hardened container runs"] == "skip"
+    assert by_name["local datasets readable"] == "ok"
+    assert exit_code(results) == 1
+
+
+def test_run_checks_without_pull_never_calls_docker_pull(tmp_path):
+    """The `flashnode work` path: a registry blip must not stop an agent
+    whose images are cached (spec 4.1)."""
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return _proc(0, stdout="flashnode-doctor")
+
+    run_checks(pull=False, run=run, which=lambda _: "/usr/local/bin/docker",
+               workdir=tmp_path, raw_local_data="")
+    assert not any(c[:2] == ["docker", "pull"] for c in calls)
