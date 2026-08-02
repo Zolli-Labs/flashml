@@ -180,6 +180,16 @@ def _work(args: list[str]) -> int:
     )
     parser.add_argument("--max-tasks", type=int, default=None)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--log-json", action="store_true",
+        help="keep the machine-readable JSON log instead of the live status view",
+    )
+    parser.add_argument(
+        "--max-consecutive-failures", type=int,
+        default=int(os.environ.get("FLASHNODE_MAX_CONSECUTIVE_FAILURES", "3")),
+        help="host-side failures in a row before re-checking this machine and "
+             "stopping if it is broken (0 disables)",
+    )
     opts = parser.parse_args(args)
 
     runner = None
@@ -272,10 +282,29 @@ def _work(args: list[str]) -> int:
         module_capable=(opts.runner != "argv"),
     )
     client.register(registration)
+    from flashnode.doctor import NON_BLOCKING_STATUSES, run_checks
+
+    def _blocking_problems():
+        """What the loop calls after a streak of host-side failures.
+
+        Filtered HERE, with the same set the startup gate reads, so the two
+        cannot drift — and so `loop.py` never has to import the doctor
+        (which would close a loop -> doctor -> executor -> loop cycle).
+        The GPU check reports "info" and never fails; a loop testing
+        `!= "ok"` itself would quarantine every CPU-only volunteer.
+
+        pull=False for the same reason the startup gate uses it: a registry
+        blip must not stop an agent whose images are already cached.
+        """
+        return [r for r in run_checks(pull=False)
+                if r.status not in NON_BLOCKING_STATUSES]
+
     loop = ExecutorLoop(
         client, node_id, runner=runner,
         poll_seconds=opts.poll_seconds, workdir_base=workdir_base,
         registration=registration,  # survives coordinator restarts
+        health_check=_blocking_problems,
+        max_consecutive_failures=opts.max_consecutive_failures,
     )
 
     def _stop(signum, frame):  # noqa: ARG001
@@ -283,7 +312,35 @@ def _work(args: list[str]) -> int:
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    accepted = loop.run(max_tasks=opts.max_tasks)
+    view = None
+    if sys.stdout.isatty() and not opts.log_json:
+        # Two writers redrawing one terminal is unreadable, so the JSON
+        # handler goes when the view arrives. --log-json keeps it, and a
+        # non-TTY never gets here — ANSI cursor movement into a pipe or a
+        # systemd journal is corruption, not output.
+        from flashnode.status import StatusView
+
+        logging.getLogger().handlers.clear()
+        view = StatusView(loop, coordinator=opts.coordinator,
+                          version=__version__, stream=sys.stdout)
+        view.start()
+    try:
+        accepted = loop.run(max_tasks=opts.max_tasks)
+    finally:
+        if view is not None:
+            view.stop()
+
+    if getattr(loop, "quarantined", False):
+        from flashnode.doctor import format_results
+
+        print(
+            "\nflashnode work: stopping — this machine can no longer run "
+            "tasks.\n" + format_results(loop.health_report or [])
+            + "\n\nFix the above, then `flashnode doctor` to confirm before "
+              "restarting.",
+            file=sys.stderr,
+        )
+        return 2
     print(f"flashnode work: {accepted} task(s) accepted", file=sys.stderr)
     return 0
 
