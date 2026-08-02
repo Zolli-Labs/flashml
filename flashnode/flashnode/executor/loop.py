@@ -141,6 +141,8 @@ class ExecutorLoop:
         registration=None,  # NodeRegistration; enables re-register after coordinator restart
         max_unpacked_bytes: int = DEFAULT_MAX_BYTES,
         max_unpacked_members: int = DEFAULT_MAX_MEMBERS,
+        health_check=None,
+        max_consecutive_failures: int = 0,
     ):
         self.client = client
         self.node_id = node_id
@@ -159,6 +161,30 @@ class ExecutorLoop:
         self.stop_event = threading.Event()
         self.tasks_accepted = 0
         self._last_node_hb = 0.0
+        # Host-facing state. Plain attributes on purpose: flashnode/status.py
+        # reads them from a separate thread on a timer, and putting a lock in
+        # the claim path to protect a counter would be trading a correctness
+        # risk for a cosmetic one.
+        self.tasks_failed = 0
+        self.consecutive_failures = 0
+        self.current_task: str | None = None
+        self.current_attempt: int | None = None
+        self.current_task_started: float | None = None
+        self.quarantined = False
+        self.health_report: list | None = None
+        # INJECTED, never imported. `doctor.py` imports
+        # `flashnode.executor.hardening`, which initialises this package,
+        # whose __init__ imports this module — loop -> doctor -> executor ->
+        # loop is a cycle that resolves or explodes by import order, which is
+        # the worst kind of bug to ship to machines we cannot reach.
+        #
+        # CONTRACT: health_check() returns the BLOCKING problems; an empty
+        # list means healthy. This loop never inspects a `.status`, because
+        # the doctor's GPU check reports "info" and never fails — a loop
+        # testing `!= "ok"` itself would quarantine every CPU-only volunteer
+        # on their third unlucky job.
+        self.health_check = health_check
+        self.max_consecutive_failures = max_consecutive_failures
 
     # -- inputs --------------------------------------------------------------
 
@@ -212,6 +238,44 @@ class ExecutorLoop:
     # -- one task ------------------------------------------------------------
 
     def execute_one(self, lease: Lease) -> bool:
+        """Run one lease, and record what its outcome says about this HOST.
+
+        Three different things return False here and only one implicates the
+        machine:
+
+            TaskExecutionError  — could not run it here            -> counts
+            LeaseLost           — someone else has the work        -> does not
+            accepted=False      — coordinator declined the result  -> does not
+
+        That last one is HTTP 200. Counting it would punish a healthy host
+        for losing a commit race — the same trap the contributions ledger hit
+        by crediting on 2xx.
+        """
+        self.current_task = lease.task_id
+        self.current_attempt = lease.attempt_number
+        self.current_task_started = time.monotonic()
+        try:
+            accepted = self._execute_inner(lease)
+        except TaskExecutionError:
+            # _execute_inner already reported fail() and logged the cause.
+            self.tasks_failed += 1
+            self.consecutive_failures += 1
+            return False
+        except LeaseLost:
+            # _execute_inner normally swallows this and returns False; the
+            # belt-and-braces handler makes the contract above true wherever
+            # it is raised from, and costs a healthy host nothing.
+            return False
+        else:
+            if accepted:
+                self.consecutive_failures = 0
+            return accepted
+        finally:
+            self.current_task = None
+            self.current_attempt = None
+            self.current_task_started = None
+
+    def _execute_inner(self, lease: Lease) -> bool:
         """Run a claimed lease end-to-end. Returns True if the commit was
         accepted. Never raises for task-level problems — they are reported."""
         payload = lease.payload
@@ -311,7 +375,10 @@ class ExecutorLoop:
                 self.client.fail(lease.lease_id, str(exc)[:500])
             except Exception:
                 pass  # lease will expire on its own — same outcome, slower
-            return False
+            # Re-raised, not returned: execute_one counts THIS outcome
+            # against the host and the other two against nobody. Caught one
+            # frame up, so callers still see False.
+            raise
         except LeaseLost:
             log.warning(_jlog("lease lost", task=lease.task_id))
             return False
@@ -329,6 +396,37 @@ class ExecutorLoop:
                 log.info(_jlog("heartbeat refused — re-registering", node=self.node_id))
                 self.client.register(self.registration)
             self._last_node_hb = time.monotonic()
+
+    def _should_stop_volunteering(self) -> bool:
+        """After a streak of host-side failures, ask whether it is the HOST.
+
+        A counter alone would guess. This measures: re-run the same checks
+        `flashnode doctor` runs, and let the answer decide.
+
+        - nothing blocking -> this machine is fine and the JOBS are failing.
+          Say so, reset, keep working. A host that stops because of someone
+          else's broken job is a host that stops for no reason.
+        - blocking problems -> stop claiming. Continuing means burning this
+          job's retries on a machine that cannot run anything.
+        """
+        if self.health_check is None or self.max_consecutive_failures <= 0:
+            return False
+        if self.consecutive_failures < self.max_consecutive_failures:
+            return False
+        unhealthy = self.health_check()
+        if not unhealthy:
+            log.info(_jlog(
+                "consecutive task failures, but this host passes its own "
+                "checks — the jobs are failing, not the machine",
+                failures=self.consecutive_failures))
+            self.consecutive_failures = 0
+            return False
+        self.quarantined = True
+        self.health_report = unhealthy
+        log.error(_jlog("stopping: this host can no longer run tasks",
+                        failures=self.consecutive_failures,
+                        failed_checks=[getattr(r, "name", "?") for r in unhealthy]))
+        return True
 
     def run(self, max_tasks: int | None = None, idle_exit: bool = False) -> int:
         """Claim-and-execute until stopped, `max_tasks` accepted, or — with
@@ -356,6 +454,8 @@ class ExecutorLoop:
                 continue
             log.info(_jlog("claimed", task=lease.task_id, attempt=lease.attempt_number))
             self.execute_one(lease)
+            if self._should_stop_volunteering():
+                break
         return self.tasks_accepted
 
 
