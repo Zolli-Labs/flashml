@@ -29,7 +29,16 @@ dependencies = [
     # INVISIBLY, which is the worst way for a floor to be wrong. The upper
     # bound is deliberate: this agent runs on machines we cannot reach, so it
     # must never be silently upgraded across a protocol-breaking release.
-    "flashruntime>=0.4,<0.5",
+    #
+    # Raised again to >=0.4.1 for the GPU probe. This one is unlike every
+    # floor above it: `inventory/capabilities.py` imports GpuInfo from
+    # flashruntime.protocol at MODULE scope, and GpuInfo does not exist in the
+    # published 0.4.0 wheel. There is no silent degradation to reason about —
+    # the agent raises ImportError and never registers at all. The release
+    # workflow's `resolvable` job runs `flashnode --help` against PyPI alone
+    # precisely to catch this, so a wrong floor here fails the release rather
+    # than a volunteer's machine.
+    "flashruntime>=0.4.1,<0.5",
     "psutil>=5.9",
     "websockets>=12",
     "cryptography>=42",
