@@ -70,7 +70,7 @@ env:
   # bumped here and not there fails that test, and so does an image that is
   # published but unreachable — which a string comparison between two files
   # could never catch, and did not.
-  IMAGE_TAG: "2026.08.1"
+  IMAGE_TAG: "2026.08.2"
   REGISTRY: ghcr.io
   NAMESPACE: zolli-labs
 
