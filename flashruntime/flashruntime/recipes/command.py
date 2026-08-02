@@ -146,6 +146,20 @@ class CommandRecipe(WorkloadRecipe):
                 # for byte. Emitting `[]` would mean the same thing today but
                 # would stop exercising that path.
                 payload["unpack_inputs"] = list(p["unpack_inputs"])
+            if p.get("local_inputs") is not None:
+                # Labels for host-supplied directories. This forward is what
+                # makes the local-data feature real: `IsolationAwarePlacement`
+                # reads `task.payload["local_inputs"]` to decide eligibility,
+                # and flashnode reads it again to know what to mount.
+                #
+                # Dropping it does NOT fail closed. The gate sees a task
+                # requiring nothing, places it on any node, and flashnode
+                # mounts nothing — so the task runs without the data it asked
+                # for. Both ends of this hop have tests that pass while it is
+                # broken, because each constructs the payload directly.
+                #
+                # `list(...)` so a payload never aliases the caller's spec.
+                payload["local_inputs"] = list(p["local_inputs"])
             tasks.append(
                 TaskSpec(
                     task_id=task_id,
