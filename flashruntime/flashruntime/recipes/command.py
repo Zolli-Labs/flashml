@@ -160,6 +160,26 @@ class CommandRecipe(WorkloadRecipe):
                 #
                 # `list(...)` so a payload never aliases the caller's spec.
                 payload["local_inputs"] = list(p["local_inputs"])
+            gpus = spec.spec.resources.gpuPerTask
+            if gpus:
+                # The GPU requirement is the ONLY payload key sourced from
+                # `spec.spec.resources` rather than `workload.parameters` —
+                # a branch of the spec nothing else in this method reads.
+                # That makes it the easiest forward in the file to leave out
+                # and the hardest to notice missing: there is no unrecognised
+                # parameter sitting in `p` to go looking for.
+                #
+                # Dropping it does NOT fail closed. `IsolationAwarePlacement`
+                # reads `task.payload["gpus"]`; with the key absent it sees a
+                # task requiring nothing, places it on any node, and a CUDA
+                # job lands on a CPU-only volunteer. Both ends of this hop
+                # have tests that pass while it is broken, because each
+                # constructs the payload directly.
+                #
+                # Absent stays absent, never 0 — the no-GPU path must keep
+                # exercising the key-missing branch, as unpack_inputs and
+                # local_inputs do.
+                payload["gpus"] = int(gpus)
             tasks.append(
                 TaskSpec(
                     task_id=task_id,
