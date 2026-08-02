@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+dist/
+build/
+.env
+.DS_Store
+*.db
+# examples write metrics.json into their own dir (cwd) when run; it is a
+# generated artifact the SDK copies out — never commit the stray original.
+examples/*/metrics.json
+# Benchmark results are timestamped scratch (python -m benchmarks run …); only
+# the committed baseline-<host>.json is tracked — the docs render it at build time.
+/benchmarks/results/*.json
+!/benchmarks/results/baseline-*.json
+# RunPod real-GPU validation artifacts (scripts/runpod_gpu_e2e.py): captured
+# pytest/bench output, pod JSON, and the per-run EPHEMERAL ssh keypair — scratch,
+# never committed.
+/scripts/runpod_results/
+# AI coding-agent scratch (task briefs, review diffs, session tokens). Local
+# tooling state, not repo content — and this repo goes public, so it must
+# never be committed.
+/.superpowers/
+# Built docs (scripts/build_docs.py) — generated from docs/site/, never committed.
+# The viewer serves the first at /docs; the second deploys to GitHub Pages.
+# Leading slash anchors /site to the repo root — do NOT ignore docs/site/ (source).
+/site/
+flashruntime/viewer/_docs/
+.gstack/

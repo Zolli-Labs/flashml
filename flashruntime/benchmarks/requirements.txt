@@ -1,0 +1,14 @@
+# Optional comparators for the benchmark suite — NOT a flashruntime dependency
+# and NOT part of any extra. The suite runs WITHOUT these: it measures
+# flashruntime and the sequential baseline for real and records the ray /
+# accelerate comparator rows as "not installed — skipped", with their setup
+# code counted from the committed, cited fixtures in
+# benchmarks/scenarios/snippets/. Install these into a THROWAWAY venv (they are
+# heavy — do not pollute the project venv) if you want the ray.tune / accelerate
+# comparators executed for real on your machine:
+#
+#     python -m venv /tmp/bench-comparators && \
+#       /tmp/bench-comparators/bin/pip install -r benchmarks/requirements.txt -e .
+#
+ray[tune]==2.46.0     # pinned to the repo's Ray (backends/ KubeRay uses Ray 2.46.0)
+accelerate==1.2.1

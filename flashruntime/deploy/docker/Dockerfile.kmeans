@@ -1,0 +1,20 @@
+# FlashML sharded K-Means workload image.
+# Build from the flashruntime repo root:
+#   docker build -f docker/Dockerfile.kmeans -t flashml/kmeans:poc-v1 .
+# Base = pinned Ray runtime; we add only the flashruntime package (protocol +
+# artifact store) and the workload module.
+FROM rayproject/ray:2.46.0-py311-cpu
+
+# Install as root (WORKDIR dirs are root-owned), then drop back to the
+# image's non-root `ray` user for runtime.
+USER root
+WORKDIR /home/ray/flashml
+
+COPY pyproject.toml README.md LICENSE ./
+COPY flashruntime ./flashruntime
+COPY flashml_workloads ./flashml_workloads
+
+RUN pip install --no-cache-dir ".[artifacts]" && chown -R ray:users /home/ray/flashml
+USER ray
+
+# Entrypoint comes from the RayJob spec (python -m flashml_workloads.<type>).
