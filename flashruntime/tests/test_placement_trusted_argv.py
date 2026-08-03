@@ -4,8 +4,10 @@ An argv payload normally requires the containerised argv contract
 (argv_capable). Inside a team pool the host's OPERATOR may opt into running
 pool argv work unsandboxed. Three legs, all required: the task is
 pool-scoped, its submitter waived the tier (allowFallback), and the node
-opted in. Any one alone must place nothing — a waiver without a pool is
-refused upstream by CommandRecipe, but this gate must not rely on that.
+opted in. Any one alone must place nothing — today `CommandRecipe` refuses
+the waiver outright, pool or not, so nothing upstream currently produces a
+waiver without a pool either; this gate must not rely on that upstream
+refusal regardless of its current shape.
 """
 
 import pytest
@@ -91,3 +93,49 @@ def test_trusted_placement_still_respects_the_pool_gate():
 
     node = _node(pools=["p-2"], unsandboxed_argv_capable=True)
     assert IsolationAwarePlacement().eligible(_argv_task("p-1"), node) is False
+
+
+def test_claim_endpoint_forwards_the_trusted_opt_in_to_the_gate():
+    """End to end over the claim endpoint (the hop that broke local_datasets
+    three times, per test_placement_pool's own claim test): registration's
+    unsandboxed_argv_capable must survive register -> node view -> gate.
+    Every eligible()-level test above hand-builds a flat node dict and so
+    cannot see this hop at all — deleting the forwarding line in
+    service/modea.py's claim node_view makes `node.get(...)` read None, the
+    gate's `is True` check fails closed, and the opted-in node below would
+    wrongly stay ineligible. This test is what catches that line going
+    missing; the unit tests above cannot."""
+    import pathlib
+
+    import fastapi
+    from fastapi.testclient import TestClient
+
+    from flashruntime.leases import LeaseManager
+    from flashruntime.service.modea import ModeAState, build_router
+
+    state = ModeAState(LeaseManager(), artifacts_dir=pathlib.Path("/tmp"))
+    app = fastapi.FastAPI()
+    app.include_router(build_router(state))
+    client = TestClient(app)
+    state.manager.add_task(_argv_task("p-1"))
+
+    def register(node_id: str, opted_in: bool):
+        r = client.post(
+            "/v1alpha1/nodes/register",
+            json={
+                "node_id": node_id, "kubernetes_node": "", "hostname": node_id,
+                "unsandboxed_argv_capable": opted_in,
+                "capabilities": {"cpu_cores": 8, "pools": ["p-1"]},
+            },
+        )
+        assert r.status_code == 200
+
+    register("not-opted-in", False)
+    register("trusted", True)
+
+    assert client.post(
+        "/v1alpha1/leases/claim", json={"node_id": "not-opted-in"}
+    ).status_code == 204
+    r = client.post("/v1alpha1/leases/claim", json={"node_id": "trusted"})
+    assert r.status_code == 200
+    assert r.json()["task_id"] == "task-000"
