@@ -15,17 +15,47 @@ container.
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 __all__ = [
+    "CLIP_FACTOR",
+    "ClipEvent",
     "NonFiniteWeights",
     "WeightShapeMismatch",
     "apply_delta",
     "decode",
     "encode",
     "reduce_deltas",
+    "reduce_deltas_with_report",
     "require_finite",
     "subtract",
 ]
+
+#: How many times the round's MEDIAN contribution norm a single contribution
+#: may be before it is scaled back to that bound.
+#:
+#: 3.0, and the number is load-bearing. The governing property of the cap is
+#: that an honest round is bit-identical to a round with no cap at all:
+#: honest per-shard variation sits well inside 3x the median, so nothing
+#: fires and the arithmetic below is untouched. A factor of 1.0 would clip
+#: roughly half of every honest round and silently alter results that are
+#: correct today — a behaviour change wearing a safety net's clothes.
+CLIP_FACTOR: float = 3.0
+
+
+class ClipEvent(NamedTuple):
+    """One contribution that exceeded the round's cap, and by how much.
+
+    `index` is POSITIONAL into the `contributions` list the caller passed,
+    not a node id: this module is pure stdlib and knows nothing about
+    machines. Attribution is the driver's job — it holds the per-task
+    provenance and maps an index back to whoever sent it.
+    """
+
+    index: int
+    norm: float
+    cap: float
+    scale: float
 
 
 class WeightShapeMismatch(ValueError):
@@ -138,13 +168,102 @@ def apply_delta(base: dict, delta: dict, scale: float = 1.0) -> dict:
     }, "apply_delta")
 
 
-def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
+def _l2_norm(blob: dict) -> float:
+    """L2 norm of a delta, flattened across every parameter.
+
+    Only ever called on a blob `require_finite` has already accepted: the
+    multiplication below is a `TypeError` on the `None` a volunteer can put
+    in `data`, and a NaN anywhere would make the norm NaN, `norm > cap`
+    False, and the contribution sail through unscaled.
+    """
+    return math.sqrt(sum(v * v for p in blob.values() for v in p["data"]))
+
+
+def _median(values: list[float]) -> float:
+    """Median, with the even-length case spelled out: the mean of the two
+    middles.
+
+    Which is precisely why the cap is weak at two contributions — the
+    median of two values is their mean, and an attacker moves a mean
+    directly. Robust statistics need a majority to be honest, and with
+    `min_participants = 2` there is no majority to have. Documented, not
+    papered over: this does not fail closed at that quorum and must not be
+    described as protection there.
+    """
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _scale_blob(blob: dict, scale: float) -> dict:
+    return {name: {"shape": list(p["shape"]),
+                   "data": [scale * v for v in p["data"]]}
+            for name, p in blob.items()}
+
+
+def reduce_deltas(contributions: list[tuple[dict, int]],
+                  *, clip_factor: float = CLIP_FACTOR) -> dict:
     """Sample-weighted mean of per-worker deltas (FedAvg).
 
     Weighting by sample count, not by worker, is what keeps the result
     equal to centralized training on the union of the shards when the
     shards are unequal — which they always are once machines differ.
+
+    A thin wrapper over `reduce_deltas_with_report`, kept because this name
+    has one production caller and 30+ tests pinning it. The clip report is
+    additive; callers that want it ask for it by name.
     """
+    return reduce_deltas_with_report(contributions, clip_factor=clip_factor)[0]
+
+
+def reduce_deltas_with_report(
+    contributions: list[tuple[dict, int]],
+    *,
+    clip_factor: float = CLIP_FACTOR,
+) -> tuple[dict, list[ClipEvent]]:
+    """`reduce_deltas`, plus the list of contributions the cap bound.
+
+    Everything MALFORMED is rejected below — non-positive, non-finite and
+    non-integer sample counts, mismatched shapes, NaN/Inf weights. What none
+    of those guards catch is a contribution that is perfectly well-formed
+    and adversarial: `delta = 1e6`, `n = 500`. Every check passes and the
+    sample-weighted mean moves the model by whatever the sender chose.
+
+    So, after validation and before the mean, each contribution's L2 norm is
+    compared against `C = median(norms) * clip_factor` and anything above it
+    is scaled to `C`. Median-anchored rather than a fixed constant because
+    the right magnitude depends on the model, the learning rate and the
+    round number, none of which this module knows — and because with a
+    majority of honest contributors the median is an honest value, which an
+    attacker-chosen mean is not.
+
+    Bounds MAGNITUDE, not direction. A small, consistently-biased delta
+    every round is unaffected, a node returning zeros still earns credit,
+    and a colluding majority defeats it by construction. It is a cap on how
+    far one contributor can move the model, not result verification.
+
+    Nothing is enforced here beyond the scaling: the events are returned so
+    the caller can record them. Revocation is a human decision.
+    """
+    # First, because it is the function's own configuration rather than
+    # untrusted input, and because the failure mode of getting it wrong is
+    # the worst one available: a non-positive or non-finite factor would
+    # disable the cap silently, the round would still reduce, and it would
+    # still report an empty clip list that an operator reads as "nobody
+    # tried". `clip_factor=0` would additionally zero every contribution.
+    try:
+        usable = math.isfinite(clip_factor) and clip_factor > 0
+    except TypeError:  # not a number at all
+        usable = False
+    if not usable:
+        raise ValueError(
+            f"reduce_deltas: clip_factor must be a finite number > 0, got "
+            f"{clip_factor!r}; a non-positive or non-finite value would "
+            "silently disable the influence cap rather than widening it"
+        )
+
     if not contributions:
         raise ValueError("reduce_deltas: no contributions")
     total = sum(n for _, n in contributions)
@@ -212,12 +331,38 @@ def reduce_deltas(contributions: list[tuple[dict, int]]) -> dict:
         _require_same_params(first, blob)
         require_finite(blob, f"reduce_deltas: contribution {i}")
 
+    # -- bounded influence, and ONLY here: after every guard above, because
+    # a malformed contribution must raise its own error rather than be
+    # quietly scaled into something plausible. Clipping caps a delta's
+    # magnitude and does nothing at all about a negative sample weight.
+    #
+    # `reduced` deliberately reuses the caller's own blob objects for every
+    # contribution that is not clipped, so an honest round accumulates the
+    # exact same float objects in the exact same order as it did before this
+    # existed. Byte-identical is the governing property; rebuilding every
+    # blob "harmlessly" would be the easiest way to lose it.
+    # Computed once, not once per use: deltas are megabytes, and this walks
+    # every weight in every contribution.
+    norms = [_l2_norm(blob) for blob, _ in contributions]
+    cap = _median(norms) * clip_factor
+    clipped: list[tuple[dict, int]] = list(contributions)
+    events: list[ClipEvent] = []
+    for i, ((blob, n), norm) in enumerate(zip(contributions, norms)):
+        # Strict `>` against a cap that is never negative — so a zero-norm
+        # contribution (a converged shard, or a lazy node returning zeros)
+        # is never the one being scaled, and `cap / norm` never divides by
+        # zero. An all-zero round puts the cap at 0.0 too and clips nothing.
+        if norm > cap:
+            scale = cap / norm
+            clipped[i] = (_scale_blob(blob, scale), n)
+            events.append(ClipEvent(index=i, norm=norm, cap=cap, scale=scale))
+
     out: dict = {}
     for name in first:
         acc = [0.0] * len(first[name]["data"])
-        for blob, n in contributions:
+        for blob, n in clipped:
             w = n / total
             for i, v in enumerate(blob[name]["data"]):
                 acc[i] += w * v
         out[name] = {"shape": list(first[name]["shape"]), "data": acc}
-    return out
+    return out, events

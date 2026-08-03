@@ -1,14 +1,18 @@
 import json
+import math
 
 import pytest
 
 from flashml_workloads.fedavg_weights import (
+    CLIP_FACTOR,
+    ClipEvent,
     NonFiniteWeights,
     WeightShapeMismatch,
     apply_delta,
     decode,
     encode,
     reduce_deltas,
+    reduce_deltas_with_report,
     subtract,
 )
 
@@ -215,6 +219,250 @@ def test_reduce_deltas_rejects_a_non_integer_float_sample_count():
     same kind of accidental-safety gap C3/C5 are about: reject it by design."""
     with pytest.raises(ValueError, match=r"contribution 1.*non-integer sample count"):
         reduce_deltas([(_blob(w=[1.0]), 10), (_blob(w=[1.0]), 2.5)])
+
+
+# -- C6: bounded influence — median-anchored L2 clipping --------------------
+#
+# Everything malformed is already rejected above. What is not rejected is a
+# contribution that is perfectly WELL-FORMED and adversarial: delta = 1e6,
+# n = 500. Every guard passes and the sample-weighted mean moves the model
+# by whatever the attacker chose. These tests pin the cap that closes it —
+# and, first and above all else, pin that an honest round is untouched.
+
+
+def _norm(blob):
+    return sum(v * v for p in blob.values() for v in p["data"]) ** 0.5
+
+
+def test_clip_factor_defaults_to_three():
+    """3.0, not 1.0, and the reason is the test directly below this one.
+
+    Honest per-shard variation sits well inside 3x the median. A factor of
+    1.0 would clip roughly half of every honest round and silently alter
+    results that are correct today — a behaviour change wearing a safety
+    net's clothes.
+    """
+    assert CLIP_FACTOR == 3.0
+
+
+def test_an_honest_round_is_byte_identical_to_the_unclipped_reduce():
+    """THE governing property: no clip fires, so the arithmetic is the old
+    arithmetic, float for float.
+
+    The expected value is a LITERAL captured from the implementation as it
+    stood before clipping existed, not recomputed by the test, so it cannot
+    drift with the code it is supposed to pin. Exact `==`, never
+    `pytest.approx`: "similar" is what a behaviour change looks like.
+
+    Norms here are 0.3775 / 0.3089 / 0.3803; the median is 0.3775 and the
+    cap 1.132, so nothing is near it — which is the point.
+    """
+    contributions = [
+        ({"w": {"shape": [3], "data": [0.10, -0.20, 0.30]},
+          "b": {"shape": [1], "data": [0.05]}}, 100),
+        ({"w": {"shape": [3], "data": [0.15, -0.10, 0.25]},
+          "b": {"shape": [1], "data": [-0.02]}}, 250),
+        ({"w": {"shape": [3], "data": [-0.05, 0.30, 0.20]},
+          "b": {"shape": [1], "data": [0.11]}}, 175),
+    ]
+    expected = {
+        "w": {"shape": [3], "data": [0.07380952380952381,
+                                     0.014285714285714277,
+                                     0.24285714285714283]},
+        "b": {"shape": [1], "data": [0.03666666666666667]},
+    }
+    assert reduce_deltas(contributions) == expected
+
+    reduced, events = reduce_deltas_with_report(contributions)
+    assert reduced == expected
+    assert events == []
+
+
+def test_a_1e6_contribution_is_scaled_to_the_cap():
+    """The attack from section 1 of the design, and the bound that answers it.
+
+    Note what is NOT claimed. The design's definition of done says the
+    reduced result "stays within the honest convex hull"; with four
+    equal-weight contributions that is arithmetically false and no clip
+    factor makes it true — a contribution admitted at the cap (3x the
+    median) necessarily pulls the mean past the honest maximum. Here the
+    honest hull is [0.9, 1.1] and the reduced result is 1.5375.
+
+    The property the mechanism actually guarantees, and the one asserted,
+    is bounded influence: after clipping every contribution has norm <= C,
+    so the mean does too. Without the cap this round reduces to 250000.75.
+    """
+    contributions = [(_blob(w=[0.9]), 100), (_blob(w=[1.0]), 100),
+                     (_blob(w=[1.1]), 100), (_blob(w=[1e6]), 100)]
+    # sorted norms 0.9, 1.0, 1.1, 1e6 -> median (1.0 + 1.1) / 2 = 1.05
+    cap = 1.05 * CLIP_FACTOR
+
+    reduced, events = reduce_deltas_with_report(contributions)
+
+    assert len(events) == 1
+    assert events[0].index == 3
+    assert events[0].norm == 1e6
+    assert events[0].cap == pytest.approx(cap)
+    assert events[0].scale == pytest.approx(cap / 1e6)
+
+    # The adversarial contribution now enters the mean at the cap, not at 1e6.
+    assert reduced["w"]["data"][0] == pytest.approx((0.9 + 1.0 + 1.1 + cap) / 4)
+    # Bounded influence, stated as the bound: |mean| <= C.
+    assert _norm(reduced) <= cap
+    # And six orders of magnitude below what the attacker asked for.
+    assert reduced["w"]["data"][0] < 2.0
+
+
+def test_a_single_contribution_is_never_clipped():
+    """Documented honest limit (design 2.3): the median of one value is that
+    value, so `norm <= C` holds trivially and nothing is scaled. Correct —
+    an outlier cannot be identified from a single sample — and it is why
+    the existing single-contribution identity tests above still pass.
+    """
+    huge = _blob(w=[1e9, -1e9])
+    reduced, events = reduce_deltas_with_report([(huge, 7)])
+    assert events == []
+    assert reduced == huge
+
+
+def test_a_zero_norm_contribution_does_not_divide_by_zero():
+    """A shard that converged (or a lazy node) sends an all-zero delta. Its
+    norm is 0.0, and the scale factor is `cap / norm` — so the guard has to
+    be written such that a zero-norm contribution is never the one being
+    scaled.
+    """
+    contributions = [(_blob(w=[0.0, 0.0]), 10), (_blob(w=[1.0, 0.0]), 10),
+                     (_blob(w=[0.0, 1.0]), 10), (_blob(w=[1e6, 0.0]), 10)]
+    reduced, events = reduce_deltas_with_report(contributions)
+    assert [e.index for e in events] == [3]
+    assert all(math.isfinite(v) for v in reduced["w"]["data"])
+
+
+def test_an_all_zero_round_clips_nothing_and_yields_no_nan():
+    """Every norm 0.0 makes the cap 0.0 as well. `norm > cap` must be false
+    there, or the round divides 0.0 by 0.0 and poisons the model with NaN —
+    the exact outcome `require_finite` exists to prevent.
+    """
+    reduced, events = reduce_deltas_with_report(
+        [(_blob(w=[0.0]), 10), (_blob(w=[0.0]), 20)])
+    assert events == []
+    assert reduced == _blob(w=[0.0])
+
+
+def test_a_zero_cap_scales_an_outlier_to_zero_rather_than_to_nan():
+    """A majority of zero-norm deltas puts the median — and so the cap — at
+    0.0. The lone mover is then scaled by `0.0 / 5.0`, i.e. removed. That is
+    the median-anchored rule working at its extreme, not a bug, and the
+    assertion here is only that it produces finite zeros rather than NaN.
+    """
+    reduced, events = reduce_deltas_with_report(
+        [(_blob(w=[0.0]), 10), (_blob(w=[0.0]), 10), (_blob(w=[5.0]), 10)])
+    assert [(e.index, e.cap, e.scale) for e in events] == [(2, 0.0, 0.0)]
+    assert reduced == _blob(w=[0.0])
+
+
+def test_clip_events_identify_the_right_contributions_by_index():
+    """`ClipEvent.index` is positional into the caller's own list — this
+    module is pure stdlib and knows nothing about nodes, so the driver is
+    what turns an index back into a machine. If the index is off by one the
+    wrong volunteer gets named, which is worse than naming nobody.
+    """
+    contributions = [(_blob(w=[1.0]), 10), (_blob(w=[1000.0]), 10),
+                     (_blob(w=[1.0]), 10), (_blob(w=[-2000.0]), 10),
+                     (_blob(w=[1.0]), 10)]
+    # sorted norms 1, 1, 1, 1000, 2000 -> median 1.0 -> cap 3.0
+    _, events = reduce_deltas_with_report(contributions)
+
+    assert [e.index for e in events] == [1, 3]
+    assert all(isinstance(e, ClipEvent) for e in events)
+    assert events[0].norm == 1000.0
+    assert events[0].cap == 3.0
+    assert events[0].scale == pytest.approx(3.0 / 1000.0)
+    assert events[1].norm == 2000.0   # magnitude, so the sign is gone
+    assert events[1].cap == 3.0
+    assert events[1].scale == pytest.approx(3.0 / 2000.0)
+
+
+def test_reduce_deltas_hides_the_report_from_its_existing_caller():
+    """`reduce_deltas` keeps its signature and its return type. It has one
+    production caller and 30+ tests above; the report is additive.
+    """
+    contributions = [(_blob(w=[1.0]), 10), (_blob(w=[1000.0]), 10),
+                     (_blob(w=[1.0]), 10)]
+    assert reduce_deltas(contributions) == \
+        reduce_deltas_with_report(contributions)[0]
+
+
+def test_a_larger_clip_factor_admits_what_a_smaller_one_clips():
+    contributions = [(_blob(w=[1.0]), 10), (_blob(w=[4.0]), 10),
+                     (_blob(w=[1.0]), 10)]
+    # median 1.0: cap 3.0 clips the 4.0, cap 5.0 does not.
+    assert [e.index for e in reduce_deltas_with_report(
+        contributions, clip_factor=3.0)[1]] == [1]
+    assert reduce_deltas_with_report(contributions, clip_factor=5.0)[1] == []
+
+
+@pytest.mark.parametrize("bad", [0, 0.0, -1.0, float("nan"), float("inf"),
+                                 float("-inf")])
+def test_a_non_positive_or_non_finite_clip_factor_is_rejected(bad):
+    """Silently disabling the cap is the worst outcome available: the round
+    still reduces, still reports `clipped: []`, and the operator reads that
+    as "nobody tried". `clip_factor=0` would additionally set the cap to
+    zero and delete every contribution. Fail loudly instead.
+
+    Both entry points, because `reduce_deltas` is the one with the callers.
+    """
+    contributions = [(_blob(w=[1.0]), 10), (_blob(w=[1.0]), 10)]
+    with pytest.raises(ValueError, match="clip_factor"):
+        reduce_deltas_with_report(contributions, clip_factor=bad)
+    with pytest.raises(ValueError, match="clip_factor"):
+        reduce_deltas(contributions, clip_factor=bad)
+
+
+# -- order matters: validate, THEN clip -------------------------------------
+
+
+def test_a_nan_weight_still_raises_rather_than_being_scaled_first():
+    """Ordering, not politeness. Clipping reads every `data` value to take a
+    norm; a NaN there makes the norm NaN, `norm > cap` false, and the
+    contribution sails through unscaled to `require_finite` — or, with a NaN
+    median, makes the cap NaN and disables the round's whole cap. The
+    validation loop must have already rejected it.
+    """
+    with pytest.raises(NonFiniteWeights, match=r"contribution 1.*'w' index 1"):
+        reduce_deltas_with_report([(_blob(w=[1.0, 1.0]), 10),
+                                   (_blob(w=[1.0, float("nan")]), 10)])
+
+
+def test_a_non_numeric_weight_still_raises_rather_than_reaching_the_norm():
+    """`None * None` is a TypeError from inside the norm, not a typed
+    weights error. The validation loop has to run first for the caller to
+    get `NonFiniteWeights`.
+    """
+    with pytest.raises(NonFiniteWeights):
+        reduce_deltas_with_report([({"w": {"shape": [1], "data": [None]}}, 10),
+                                   (_blob(w=[1.0]), 10)])
+
+
+def test_the_sample_count_guards_still_fire_before_any_clipping():
+    """The documented attack — (delta=-999, n=-999) and (delta=1.0, n=1000)
+    — must still be REJECTED, not clipped into something plausible. Clipping
+    bounds a delta's magnitude and does nothing whatsoever about a negative
+    sample weight, so a round that silently continued here would be a
+    regression dressed as a defence.
+    """
+    with pytest.raises(ValueError, match="non-positive sample count"):
+        reduce_deltas_with_report([(_blob(w=[-999.0]), -999),
+                                   (_blob(w=[1.0]), 1000)])
+    with pytest.raises(ValueError, match=r"contribution 1.*non-finite sample count"):
+        reduce_deltas_with_report([(_blob(w=[1.0]), 10),
+                                   (_blob(w=[1e9]), float("nan"))])
+
+
+def test_a_shape_mismatch_still_raises_rather_than_being_clipped():
+    with pytest.raises(WeightShapeMismatch):
+        reduce_deltas_with_report([(_blob(w=[1.0]), 1),
+                                   (_blob(w=[1.0, 2.0]), 1)])
 
 
 def test_scalar_parameter_with_empty_shape():
