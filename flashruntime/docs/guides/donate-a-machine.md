@@ -222,8 +222,30 @@ the system, and you should weigh them before joining.
    [Authenticating your machine](#authenticating-your-machine)) confine
    *where* a node may write — they say nothing about whether what it writes
    is true. Nothing today re-runs a sample of tasks elsewhere and compares
-   results. Spot-check verification and a reputation system are designed
-   but not built.
+   results.
+
+   This paragraph used to end "Spot-check verification and a reputation
+   system are designed but not built." That was wrong and is corrected here:
+   **no such design exists** in either repo. (`flashnode/benchmark/` is
+   sometimes cited as the design; it is not — it is admission *capability*
+   probing, `cpu_hash_mbps` / `mem_bandwidth_mbps` / `disk_write_mbps`, which
+   measures how fast a host is, never whether its answers are correct.)
+
+   What DOES exist, as of 2026-08-03, is narrower and applies to **federated
+   jobs only**: each contribution's weight delta is capped in magnitude
+   before averaging, at 3× the median norm of that round. That stops one
+   participant steering the shared model arbitrarily. It does **not** verify
+   anything:
+
+   - it bounds *magnitude*, not *direction* — a small, consistently biased
+     delta every round passes untouched;
+   - it does not detect a lazy node, because returning zeros or replaying
+     last round's delta has a perfectly ordinary norm and still earns credit;
+   - with only two participants it is weak by construction: the median of two
+     values is their mean, which an attacker influences directly. Robust
+     statistics need a majority, and two contributors have no majority;
+   - a colluding majority defeats it entirely;
+   - sweeps and `command` jobs get nothing from it at all.
 2. **Static, out-of-band token issuance.** Per-machine tokens replaced the
    old shared join code — each volunteer now authenticates with its own
    `flashnode login`-saved bearer token, confined to the leases it holds,
