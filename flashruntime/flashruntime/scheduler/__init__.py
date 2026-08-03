@@ -209,6 +209,51 @@ class IsolationAwarePlacement(PlacementPolicy):
     — hardware either exists on a host or it does not, and the submitter's
     isolation posture has nothing to say about it.
 
+    A sixth gate applies to tasks whose payload lists `exclude_nodes`: the
+    claiming node must not be named there. It is the one runtime change
+    upfront redundant assignment cannot be built without — a verification
+    twin carries the same payload as its original and must land on a
+    DIFFERENT machine, and nothing here could previously say "anywhere but
+    there". With a fleet of two, the twin otherwise lands on the same node
+    half the time, verifying nothing at double the cost.
+
+    **Fail closed**, taking the argv/local-data/gpu polarity and not the
+    module gate's, and the asymmetry is the whole argument:
+
+    - A task excluded from everywhere simply never runs, and that announces
+      itself — the queue does not drain and the redundancy slice records
+      `unknown`, which it is required never to render as `pass`.
+    - A twin misplaced onto the excluded node produces a MATCH, which is
+      recorded as agreement, which reads as verified. That failure is
+      invisible after the fact and cannot be distinguished from a real
+      verification by anything downstream. An unplaceable task costs a task;
+      a fake verification costs the reason the feature exists.
+
+    - The requirement must be a genuine *list* of names. A bare string is
+      refused even when it looks right, for the reason `local_inputs` states
+      at length: `"node-a" in "node-alpha"` is True, so a string exclusion
+      would quietly refuse every host whose name contains another's.
+    - Every member must be a `str`. A `None`, an `int`, or a nested object
+      means the exclusion was built wrong — and the node it meant to name is
+      exactly the one a plain membership test would then let through. The
+      whole task fails closed rather than the one member being skipped.
+    - An EMPTY list excludes nobody and runs anywhere, like `gpus: 0` and an
+      empty `local_inputs`. It is what the first member of a pair carries:
+      dispatched before anyone has claimed the other, it has nobody to
+      exclude yet.
+    - The node's own identity must be readable: a non-empty `str` `node_id`.
+      A view that cannot answer "are you the node we must avoid?" is refused,
+      because "we could not tell" resolving to "go ahead" is the same failure
+      the gate exists to prevent, reached from the other side. Scoped to
+      tasks that actually exclude something — an absent or empty exclusion
+      asks no question. It costs nothing real: every node view the claim
+      endpoint builds carries the node_id it just authenticated.
+
+    `allowFallback` does not waive this one either. It waives the sandbox
+    tier and nothing else; a submitter has no standing to say which machine
+    already holds the other half of a verification pair — and the point of
+    the pair is that the node cannot tell it is in one.
+
     Everything genuinely standard keeps the fail-open placement default."""
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
@@ -258,6 +303,25 @@ class IsolationAwarePlacement(PlacementPolicy):
                 )
                 if not isinstance(advertised, list) or len(advertised) < required_gpus:
                     return False  # absent/short/type-confused ⇒ not capable
+        # Fail-closed like the gates above, and checked before the
+        # allowFallback waiver for the same reason: a submitter cannot waive
+        # their way onto the machine already running the other half of their
+        # verification pair — and is not supposed to know there is one.
+        excluded = task.payload.get("exclude_nodes")
+        if excluded is not None:
+            if not isinstance(excluded, list):
+                return False  # type-confused requirement ⇒ fail closed, no crash
+            if excluded:
+                if not all(isinstance(name, str) for name in excluded):
+                    # A non-name member means this list was built wrong, and
+                    # the node it meant to exclude is precisely the one a
+                    # membership test would now let through.
+                    return False
+                node_id = node.get("node_id")
+                if not isinstance(node_id, str) or not node_id:
+                    return False  # cannot answer "is this you?" ⇒ do not risk it
+                if node_id in excluded:
+                    return False
         isolation = task.payload.get("isolation")
         if isolation is None:
             return True  # no isolation payload ⇒ standard, runs anywhere
