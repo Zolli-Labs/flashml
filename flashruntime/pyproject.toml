@@ -5,6 +5,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashruntime"
+# 0.4.3 adds team pools: NodeCapabilities.pools + NodeHeartbeat.pools
+# (stamped server-side by the cloud proxy, never by agents),
+# NodeRegistration.unsandboxed_argv_capable (operator opt-in, fail closed),
+# PlacementSpec.pool widened from a dead closed Literal to str, the seventh
+# placement gate, and the trusted-pool argv alternative. Fedavg round bodies
+# carry placement.pool so pool confinement survives round boundaries.
+# Additive and optional on the wire, so the compatibility range does not
+# move — the bump is 0.4.1's rule again: bump on any wire-visible change,
+# even additive.
+# Agents need nothing from this release unless they opt into
+# `--runner trusted` (flashnode 0.3.4, whose floor moves to >=0.4.3).
+#
 # 0.4.2 adds ExecutionEvidence and CompleteRequest.evidence — the agent's
 # self-report at commit time. Additive and OPTIONAL on the wire, so the
 # compatibility range does not move and an agent that predates it keeps
@@ -34,7 +46,7 @@ name = "flashruntime"
 # must pin a range that includes it. (0.3.0 was the first published release;
 # 0.1.0 and 0.2.0 were declared here but never reached PyPI.) Released from
 # the Zolli-Labs/flashml monorepo by pushing a `flashruntime-vX.Y.Z` tag.
-version = "0.4.2"
+version = "0.4.3"
 description = "Open fault-tolerant distributed ML runtime: strategy planning, job protocol, leases, checkpointing, and recovery across heterogeneous compute."
 readme = "README.md"
 # PEP 639 SPDX expression (string form) — replaces the deprecated
