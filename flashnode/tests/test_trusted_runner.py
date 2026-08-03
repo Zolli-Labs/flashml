@@ -60,17 +60,17 @@ def test_nonzero_exit_raises_and_records_the_code(tmp_path):
 
 def test_environment_is_scrubbed(tmp_path, monkeypatch):
     """The task must not inherit the agent's secrets — same whitelist as
-    SubprocessRunner (task_env)."""
+    SubprocessRunner (task_env). The out path travels as an argv token so
+    the /work rewrite applies to it."""
     monkeypatch.setenv("FLASHNODE_MACHINE_TOKEN", "fmk_secret")
-    out = tmp_path / "probe"
-    runner = TrustedArgvRunner()
-    runner.run(
-        _payload(["python", "-c",
-                  "import os, pathlib; pathlib.Path('/work/out').mkdir(exist_ok=True);"
-                  "pathlib.Path('/work/out/env.txt').write_text("
-                  "str('FLASHNODE_MACHINE_TOKEN' in os.environ))"]),
-        tmp_path, {},
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import os, pathlib, sys\n"
+        "out = pathlib.Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)\n"
+        "(out / 'env.txt').write_text(str('FLASHNODE_MACHINE_TOKEN' in os.environ))\n"
     )
+    runner = TrustedArgvRunner()
+    runner.run(_payload(["python", str(probe), "/work/out"]), tmp_path, {})
     assert (tmp_path / "out" / "env.txt").read_text() == "False"
 
 
