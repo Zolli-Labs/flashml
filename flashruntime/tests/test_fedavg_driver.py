@@ -558,6 +558,53 @@ def test_image_and_isolation_tier_are_settable_by_the_caller():
     assert spec["isolation"]["tier"] == "sandboxed"
 
 
+def test_pool_travels_through_round_bodies_to_task_payloads():
+    """Pool confinement must survive the round boundary.
+
+    The cloud API calls `run_fedavg` directly to drive every round of a
+    federated job — round 1+ bodies are built here, by `_round_body`, never
+    by `CommandRecipe.expand`. Without this stamp a pool-scoped job would
+    revert to `pool: "any"` on round 1, exactly the "unstamped hop" bug the
+    four expander stamps in recipes/command.py and service/modea.py exist to
+    prevent (tests/test_recipe_pool.py) — this is that same bug's fifth
+    hop, one `run_fedavg` alone can produce."""
+    from flashruntime.protocol.v1alpha1 import JobSpec
+    from flashruntime.service.modea import expand_tasks
+
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+    run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+               worker_params=_params(), pool="p-1",
+               initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    body = fake.submitted[0][1]
+    assert body["spec"]["placement"]["pool"] == "p-1"
+
+    # The full round-boundary hop: what the driver submits is what the
+    # service actually expands, not a hand-built intermediate.
+    spec = JobSpec.model_validate(body)
+    tasks = expand_tasks("job-x", spec)
+    assert tasks, "expected at least one task"
+    assert all(t.payload["pool"] == "p-1" for t in tasks)
+
+
+def test_no_pool_leaves_placement_absent_byte_compatible_with_today():
+    """`pool=None` (the default) must reproduce exactly today's body — no
+    `placement` key at all, and no `pool` in any task payload."""
+    from flashruntime.protocol.v1alpha1 import JobSpec
+    from flashruntime.service.modea import expand_tasks
+
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10)]})
+    run_fedavg(fake, rounds=1, num_shards=2, min_participants=2,
+               worker_params=_params(),
+               initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    body = fake.submitted[0][1]
+    assert "placement" not in body["spec"]
+
+    spec = JobSpec.model_validate(body)
+    tasks = expand_tasks("job-x", spec)
+    assert tasks, "expected at least one task"
+    assert all("pool" not in t.payload for t in tasks)
+
+
 def test_an_image_without_a_tag_is_rejected():
     fake = FakeCoordinator({0: [(0, 1.0, 10)]})
     with pytest.raises(ValueError, match="repository:tag"):
