@@ -29,7 +29,7 @@ from typing import Any, Callable, Protocol, Sequence, TypedDict
 
 from flashml_workloads.fedavg_weights import (
     apply_delta,
-    reduce_deltas,
+    reduce_deltas_with_report,
     require_finite,
 )
 
@@ -72,6 +72,26 @@ class RoundResult(TypedDict):
     participants: int
     mean_loss: float
     job_id: str
+
+    #: The round's contributions whose influence the aggregation capped, as
+    #: ``{"task_id", "norm", "cap", "scale"}`` — empty on an honest round,
+    #: which is every round unless somebody tried.
+    #:
+    #: ``task_id``, not a node id, because a task id is what this driver
+    #: actually holds. `fedavg_weights` reports positional indices; the round
+    #: knows which task each position came from, and a task is what a
+    #: coordinator leases. Resolving that to a MACHINE means deciding which
+    #: attempts count as accepted work, and that judgement already lives in
+    #: exactly one place — the cloud's round recorder, which reads the
+    #: coordinator's task view for provenance and joins on this task id.
+    #: Making a second copy of it here is how the two disagree.
+    #:
+    #: Recorded, never enforced. Nothing is quarantined, no credit withheld,
+    #: no lease refused: with a fleet this small a false positive costs a
+    #: volunteer their machine while a false negative costs one undeserved
+    #: credit, and that asymmetry only points one way. The row exists so the
+    #: owner can look.
+    clipped: list[dict]
 
 
 class RoundPlan(TypedDict):
@@ -535,7 +555,17 @@ def run_fedavg(
         # download. Anything committing from here on is discarded by
         # construction: we never re-read this job after aggregating.
         collected = _fetch(coord, keys)
-        reduced = reduce_deltas([(d, n) for d, n, _ in collected])
+        reduced, clip_events = reduce_deltas_with_report(
+            [(d, n) for d, n, _ in collected])
+        # `_fetch` preserves `keys`' order one-for-one, and every key in
+        # `keys` came out of the expected-key map, so a clip event's
+        # positional index resolves back to the exact task that sent it.
+        # Positional, NOT a shard number: a round aggregates on a quorum, so
+        # with shard-001 absent the third committer sits at position 2, and
+        # re-deriving `shard-{index:03d}` would name an honest volunteer.
+        by_key = _expected_metrics_keys(job_id, task_ids)
+        clipped = [{"task_id": by_key[keys[e.index]], "norm": e.norm,
+                    "cap": e.cap, "scale": e.scale} for e in clip_events]
         # No weights yet (`initial_weights={}` and nothing aggregated): the
         # round's workers were handed nothing, so what they reported as
         # "the change from what you were given" is the weights themselves.
@@ -561,6 +591,7 @@ def run_fedavg(
             "participants": len(collected),
             "mean_loss": sum(loss * n for _, n, loss in collected) / total_n,
             "job_id": job_id,
+            "clipped": clipped,
         }
         history.append(result)
         if on_round is not None:

@@ -853,3 +853,81 @@ def test_build_round_returning_duplicate_task_ids_is_refused():
                    initial_weights={"w": {"shape": [1], "data": [0.0]}},
                    build_round=build)
     assert fake.submitted == []
+
+
+# -- bounded influence: who the cap bound, not just that it bound somebody ---
+#
+# `reduce_deltas_with_report` reports POSITIONAL indices into the list it was
+# handed — it is pure stdlib and knows nothing about machines. The driver is
+# the layer that holds per-task provenance, so turning an index back into
+# something an operator can act on is its job, and getting it wrong names the
+# wrong volunteer, which is worse than naming nobody.
+
+
+def test_an_honest_round_reports_nothing_clipped():
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.1, 10), (2, 0.9, 10)]})
+    result = run_fedavg(fake, rounds=1, num_shards=3, min_participants=3,
+                        worker_params=_params(),
+                        initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    assert result["history"][0]["clipped"] == []
+
+
+def test_a_round_with_one_adversarial_shard_names_that_shard():
+    """Norms 1.0 / 1.0 / 1e6: the median is 1.0, the cap 3.0, and shard-002
+    enters the average at 3.0 instead of 1000000.0."""
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10), (2, 1e6, 10)]})
+    result = run_fedavg(fake, rounds=1, num_shards=3, min_participants=3,
+                        worker_params=_params(),
+                        initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+    clipped = result["history"][0]["clipped"]
+    assert len(clipped) == 1
+    assert clipped[0]["task_id"] == "shard-002"
+    assert clipped[0]["norm"] == 1e6
+    assert clipped[0]["cap"] == pytest.approx(3.0)
+    assert clipped[0]["scale"] == pytest.approx(3e-6)
+
+    # And the model actually moved by the bounded amount, not the asked one.
+    assert result["weights"]["w"]["data"][0] == pytest.approx((1.0 + 1.0 + 3.0) / 3)
+
+
+def test_the_clipped_shard_is_identified_positionally_not_by_shard_number():
+    """The test that catches the tempting `f"shard-{index:03d}"`.
+
+    Only shards 0, 2 and 3 of a four-shard round commit — shard-001 is a
+    closed laptop, which is the normal case this driver aggregates on a
+    QUORUM to tolerate. The adversary is shard-003, but it sits at
+    POSITION 2 in the collected list, so an implementation that treats the
+    clip index as a shard number blames shard-002: an honest volunteer.
+    """
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (2, 1.0, 10), (3, 5000.0, 10)]})
+    result = run_fedavg(fake, rounds=1, num_shards=4, min_participants=3,
+                        worker_params=_params(),
+                        initial_weights={"w": {"shape": [1], "data": [0.0]}})
+
+    assert [c["task_id"] for c in result["history"][0]["clipped"]] == ["shard-003"]
+
+
+def test_the_clip_report_reaches_the_on_round_callback():
+    """`on_round` is what the cloud writes a `job_rounds` row from, so an
+    event that only ever appears in the returned history is an event the
+    owner never gets to look at."""
+    seen = []
+    fake = FakeCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10), (2, 1e6, 10)]})
+    run_fedavg(fake, rounds=1, num_shards=3, min_participants=3,
+               worker_params=_params(), on_round=seen.append,
+               initial_weights={"w": {"shape": [1], "data": [0.0]}})
+    assert [c["task_id"] for c in seen[0]["clipped"]] == ["shard-002"]
+
+
+def test_a_command_shaped_round_names_its_own_task_ids():
+    """Task ids come from the round's `RoundPlan`, not from a shard-naming
+    rule: a caller compiling the round as a `command` workload gets
+    `task-000`, `task-001`, ... and the clip report has to follow it."""
+    fake = CommandShapedCoordinator({0: [(0, 1.0, 10), (1, 1.0, 10),
+                                         (2, 1e6, 10)]})
+    result = run_fedavg(fake, rounds=1, num_shards=3, min_participants=3,
+                        worker_params=_params(),
+                        initial_weights={"w": {"shape": [1], "data": [0.0]}},
+                        build_round=_command_plan(3))
+    assert [c["task_id"] for c in result["history"][0]["clipped"]] == ["task-002"]
