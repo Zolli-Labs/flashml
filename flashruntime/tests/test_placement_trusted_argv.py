@@ -4,10 +4,11 @@ An argv payload normally requires the containerised argv contract
 (argv_capable). Inside a team pool the host's OPERATOR may opt into running
 pool argv work unsandboxed. Three legs, all required: the task is
 pool-scoped, its submitter waived the tier (allowFallback), and the node
-opted in. Any one alone must place nothing — today `CommandRecipe` refuses
-the waiver outright, pool or not, so nothing upstream currently produces a
-waiver without a pool either; this gate must not rely on that upstream
-refusal regardless of its current shape.
+opted in. Any one alone must place nothing — `CommandRecipe` now accepts the
+waiver only when it is pool-scoped (`allowFallback` iff `placement.pool` is
+set), so nothing upstream should ever produce a waiver without a pool
+either; this gate must not rely on that upstream coupling regardless of its
+current shape.
 """
 
 import pytest

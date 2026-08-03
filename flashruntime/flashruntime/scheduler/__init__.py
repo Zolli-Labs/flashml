@@ -138,10 +138,11 @@ class IsolationAwarePlacement(PlacementPolicy):
     The pool leg here is a guard, not the boundary: the seventh gate below
     independently confines the task to pool members regardless of this one.
     This leg exists so that a waiver which somehow reached placement without
-    a pool — today `CommandRecipe` refuses `allowFallback` outright, pool or
-    not, so nothing upstream currently produces one — still unlocks nothing.
-    The gate does not trust another layer to have already enforced the rule
-    it is itself stating.
+    a pool — `CommandRecipe` now accepts `allowFallback` only when
+    `placement.pool` is set, coupling the waiver to a pool at submission
+    time, so nothing upstream should ever produce one without a pool — still
+    unlocks nothing here either. The gate does not trust another layer to
+    have already enforced the rule it is itself stating.
 
     A third gate applies to tasks carrying a `module` payload (the
     "python -m <allowlisted module>" tier): the claiming node must not be

@@ -82,13 +82,16 @@ class CommandRecipe(WorkloadRecipe):
 
     def expand(self, job_id: str, spec: JobSpec) -> list[TaskSpec]:
         isolation_spec = spec.spec.isolation
-        if isolation_spec.allowFallback:
-            # allowFallback waives the sandbox capability requirement at
-            # placement time. Honouring it for argv would let a submitter
-            # place arbitrary code on an unsandboxed node.
+        pool = spec.spec.placement.pool
+        if isolation_spec.allowFallback and pool == "any":
+            # The waiver is only acceptable INSIDE a pool: members chose to
+            # trust each other, and the seventh gate confines the task to
+            # them. Without a pool it would let a submitter place arbitrary
+            # code on any opted-in host — the exact thing the original
+            # unconditional refusal existed to prevent.
             raise ValueError(
-                "command jobs may not set isolation.allowFallback — "
-                "argv execution is container-only"
+                "command jobs may not set isolation.allowFallback without "
+                "placement.pool — unsandboxed argv is confined to team pools"
             )
         if isolation_spec.tier != "sandboxed":
             # Coordinator-side opt-in only: the operator running the pool
@@ -180,6 +183,12 @@ class CommandRecipe(WorkloadRecipe):
                 # exercising the key-missing branch, as unpack_inputs and
                 # local_inputs do.
                 payload["gpus"] = int(gpus)
+            if pool != "any":
+                # Same hop, same warning as local_inputs/gpus above: dropping
+                # this does NOT fail closed — the seventh gate would see a
+                # task requiring nothing and place it anywhere, carrying the
+                # waiver with it. Absent stays absent for "any".
+                payload["pool"] = pool
             tasks.append(
                 TaskSpec(
                     task_id=task_id,
