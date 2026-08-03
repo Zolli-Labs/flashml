@@ -633,6 +633,19 @@ def build_router(state: ModeAState) -> APIRouter:
         if entry is None:
             raise HTTPException(status_code=404, detail=f"unknown node {node_id} — register first")
         entry.last_heartbeat = hb.timestamp
+        if hb.pools is not None:
+            # Server-stamped membership refresh (cloud proxy). A list, even
+            # empty, replaces the registration's pools wholesale; None means
+            # no statement. Replace the capabilities object rather than
+            # mutating it in place so the registration model stays the
+            # single source the claim node view dumps from.
+            entry.registration = entry.registration.model_copy(
+                update={
+                    "capabilities": entry.registration.capabilities.model_copy(
+                        update={"pools": list(hb.pools)}
+                    )
+                }
+            )
         return {"status": "ok"}
 
     @router.get("/nodes")

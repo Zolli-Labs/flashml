@@ -254,6 +254,53 @@ class IsolationAwarePlacement(PlacementPolicy):
     already holds the other half of a verification pair — and the point of
     the pair is that the node cannot tell it is in one.
 
+    A seventh gate applies to tasks whose payload names a `pool`: the
+    claiming node's `capabilities.pools` must list it. It takes the
+    argv/local-data/gpu/exclude_nodes polarity — **fail closed** — and for
+    the sharpest reason of the seven: pool jobs are precisely the ones that
+    CARRY `allowFallback`, so a task that slipped this gate would not just
+    misplace, it would run UNSANDBOXED on a machine outside the trust
+    boundary the waiver assumed. Checked before the isolation block for the
+    same reason the gates above are — but here the ordering is load-bearing
+    twice over, since this gate and the waiver interact directly rather than
+    merely sharing a payload:
+
+    - The requirement must be a non-empty `str`. `None` means no pool was
+      asked for and the task places like any pre-pools job; anything else
+      typed (an `int`, a `list`, `True`, or the empty string) is a
+      type-confused requirement and makes the task ineligible everywhere,
+      exactly as a non-`int` `gpus` or a non-list `exclude_nodes` does.
+    - `capabilities` may be absent or type-confused; read as membership in
+      no pool rather than allowed to raise, via `isinstance`, not
+      `capabilities.get(...) or {}` — a string `capabilities` value has no
+      `.get` and must fail closed rather than crash the predicate, the same
+      pattern the gpu gate uses for the same reason.
+    - The advertisement must be a genuine *list* of names. Absent, `None`, a
+      bare string, a dict, or a bare `int` all count as serving no pool. A
+      bare string deserves the same suspicion `local_datasets` earns:
+      substring membership would let one node's advertisement quietly match
+      a pool it never joined.
+    - Every member must be a `str`. A `None`, an `int`, or a nested object
+      means the stamp was built wrong, and the pool it meant to serve is
+      exactly the one a plain membership test would then get wrong — the
+      same shape of failure `exclude_nodes` refuses for the same reason.
+      The whole node is refused rather than the one bad member ignored.
+
+    `allowFallback` does not waive this gate, and this is the one case in
+    the class where saying so is not enough — the test that pins it
+    (`test_allow_fallback_does_not_waive_the_pool_gate`) is the argument
+    itself, not a restatement of it. Every other gate's waiver-immunity is
+    "the waiver covers the sandbox tier and nothing else, so it has nothing
+    to say here." This gate's is stronger: pool-scoped jobs are the ones
+    that set `allowFallback: true` in the first place, trading the
+    sandboxed-container guarantee for a trusted-pool machine that runs their
+    argv directly. If this gate waived on `allowFallback`, the exact tasks
+    carrying that trade would be the ones allowed to escape the pool
+    boundary that made the trade acceptable, and they would land unsandboxed
+    on a stranger's machine — the design's worst failure mode, reached by
+    reading the one waiver already present on every task this gate exists to
+    confine.
+
     Everything genuinely standard keeps the fail-open placement default."""
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
@@ -322,6 +369,30 @@ class IsolationAwarePlacement(PlacementPolicy):
                     return False  # cannot answer "is this you?" ⇒ do not risk it
                 if node_id in excluded:
                     return False
+        # Fail-closed like every gate above, and checked before the
+        # allowFallback waiver below for the sharpest reason yet: pool jobs
+        # are exactly the ones that CARRY the waiver, so a pool task that
+        # slipped this gate would run unsandboxed on a machine outside the
+        # trust boundary that made the waiver acceptable.
+        required_pool = task.payload.get("pool")
+        if required_pool is not None:
+            if not isinstance(required_pool, str) or not required_pool:
+                return False  # type-confused requirement ⇒ fail closed, no crash
+            capabilities = node.get("capabilities")
+            # isinstance, not `or {}` — a string capabilities value has no
+            # `.get` and must fail closed rather than crash the predicate.
+            advertised = (
+                capabilities.get("pools") if isinstance(capabilities, dict) else None
+            )
+            if not isinstance(advertised, list):
+                return False  # absent/type-confused ⇒ serves no pool
+            if not all(isinstance(p, str) for p in advertised):
+                # A non-name member means the stamp was built wrong; the pool
+                # it meant to serve is precisely what a membership test would
+                # now get wrong. Refuse the node, not the one member.
+                return False
+            if required_pool not in advertised:
+                return False
         isolation = task.payload.get("isolation")
         if isolation is None:
             return True  # no isolation payload ⇒ standard, runs anywhere
