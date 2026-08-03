@@ -19,7 +19,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from flashruntime.protocol.v1alpha1 import Lease, NodeHeartbeat, NodeRegistration
+from flashruntime.protocol.v1alpha1 import (
+    ExecutionEvidence,
+    Lease,
+    NodeHeartbeat,
+    NodeRegistration,
+)
 
 
 class LeaseLost(Exception):
@@ -122,11 +127,25 @@ class CoordinatorClient:
         if status != 200:
             raise RuntimeError(f"attempt heartbeat failed ({status}): {body}")
 
-    def complete(self, lease_id: str, output_sha256: str) -> bool:
+    def complete(
+        self,
+        lease_id: str,
+        output_sha256: str,
+        evidence: ExecutionEvidence | None = None,
+    ) -> bool:
+        """Commit this attempt, optionally saying what the run looked like.
+
+        `evidence` is a keyword with a default so every existing caller keeps
+        working, and the body is byte-for-byte the one previous releases sent
+        when there is nothing to report — this agent may be talking to a
+        coordinator that predates the field, and an empty block is not the
+        same statement as no block.
+        """
+        payload: dict = {"output_sha256": output_sha256}
+        if evidence is not None:
+            payload["evidence"] = evidence.model_dump(mode="json")
         status, body = self._json(
-            "POST",
-            f"/v1alpha1/attempts/{lease_id}/complete",
-            {"output_sha256": output_sha256},
+            "POST", f"/v1alpha1/attempts/{lease_id}/complete", payload
         )
         if status != 200:
             raise RuntimeError(f"complete failed ({status}): {body}")

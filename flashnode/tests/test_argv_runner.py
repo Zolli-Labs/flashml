@@ -66,7 +66,11 @@ def test_argv_lands_after_the_image_so_flags_are_inert(tmp_path):
     with mock.patch("subprocess.run") as run:
         run.return_value = mock.Mock(returncode=0, stderr=b"")
         _runner().run(_payload(argv=["--privileged"]), tmp_path, {})
-    cmd = run.call_args[0][0]
+    # [0], not call_args: a successful run is followed by a best-effort
+    # `docker image inspect` for the execution-evidence digest, so the LAST
+    # call is no longer the one under test. Same convention as the
+    # timeout/kill test below, which has always had two calls to tell apart.
+    cmd = run.call_args_list[0][0][0]
     assert cmd.index("--privileged") > cmd.index("ghcr.io/zolli/trainer:1.0")
 
 
@@ -137,7 +141,7 @@ def test_container_name_is_docker_legal_even_with_hostile_task_id(tmp_path, task
     with mock.patch("subprocess.run") as run:
         run.return_value = mock.Mock(returncode=0, stderr=b"")
         _runner().run(_payload(task_id=task_id), tmp_path, {})
-    cmd = run.call_args[0][0]
+    cmd = run.call_args_list[0][0][0]  # the `docker run`, not the digest probe
     name = cmd[cmd.index("--name") + 1]
     assert re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", name)
 
@@ -160,6 +164,6 @@ def test_container_name_unique_across_concurrent_tasks(tmp_path):
         with mock.patch("subprocess.run") as run:
             run.return_value = mock.Mock(returncode=0, stderr=b"")
             _runner().run(_payload(), tmp_path, {})
-        cmd = run.call_args[0][0]
+        cmd = run.call_args_list[0][0][0]  # the `docker run`, not the digest probe
         names.append(cmd[cmd.index("--name") + 1])
     assert names[0] != names[1]

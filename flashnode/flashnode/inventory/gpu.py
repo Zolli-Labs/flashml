@@ -82,6 +82,74 @@ def probe_gpus(run: CommandRunner | None = None) -> list[GpuInfo]:
     return []
 
 
+#: What "how busy is it right now" is called in nvidia-smi's vocabulary.
+UTILISATION_FIELD = "utilization.gpu"
+
+
+def probe_gpu_utilisation(run: CommandRunner | None = None) -> float | None:
+    """Mean GPU utilisation across this host's devices right now, or `None`.
+
+    Feeds `ExecutionEvidence.gpu_util_percent_mean`: sampled repeatedly while
+    a task runs, averaged, and reported at commit time. 0% on a task that
+    asked for a GPU is the strongest single signal the evidence slice carries
+    — and the one thing that partially covers GPU work, which redundant
+    re-execution cannot verify at all (CUDA is non-deterministic).
+
+    `None` AND `0.0` ARE BOTH REAL ANSWERS AND THEY ARE NOT THE SAME ONE.
+    `0.0` means the driver was asked and reported an idle card. `None` means
+    there was nothing to ask — no driver, no `nvidia-smi`, output this
+    runtime cannot parse. Collapsing them would report every CPU-only
+    volunteer as a GPU host that did nothing, which is the exact shape of an
+    accusation.
+
+    Same contract as `probe_gpus`: never raises, never guesses, `run` is a
+    parameter resolved at CALL time so the suite exercises it with no driver.
+    Bounded by `PROBE_TIMEOUT_S` because this one is called *during* a task,
+    not just at registration — a wedged probe must never wedge the run.
+    """
+    run = run or subprocess.run
+    try:
+        proc = run(
+            [
+                "nvidia-smi",
+                f"--query-gpu={UTILISATION_FIELD}",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+        if getattr(proc, "returncode", 1) != 0:
+            return None
+        readings = _utilisations(_text(getattr(proc, "stdout", None)))
+    except Exception:  # noqa: BLE001 - see the module docstring
+        return None
+    if not readings:
+        return None
+    return sum(readings) / len(readings)
+
+
+def _utilisations(text: str) -> list[float]:
+    """Every percentage the driver reported, dropping what it would not say.
+
+    One unreadable card costs that card, not the reading — the same rule
+    `_parse` applies to devices. Values outside 0–100 are a misparse, not a
+    measurement, and are dropped rather than averaged in.
+    """
+    readings: list[float] = []
+    for line in text.splitlines():
+        cell = line.strip()
+        if not cell or cell.lower() in _PLACEHOLDERS:
+            continue
+        try:
+            value = float(cell.split()[0])  # tolerate a stray "%" or unit
+        except (ValueError, IndexError):
+            continue
+        if 0.0 <= value <= 100.0:
+            readings.append(value)
+    return readings
+
+
 def _query(run: CommandRunner, fields: Sequence[str]) -> list[GpuInfo]:
     proc = run(
         [

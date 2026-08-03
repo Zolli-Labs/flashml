@@ -5,6 +5,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashruntime"
+# 0.4.2 adds ExecutionEvidence and CompleteRequest.evidence — the agent's
+# self-report at commit time. Additive and OPTIONAL on the wire, so the
+# compatibility range does not move and an agent that predates it keeps
+# committing work; the bump is the same rule as 0.4.1's, applied to a
+# wire-visible change even though nothing breaks.
+#
+# flashnode’s floor moves to >=0.4.2,<0.5 in the same change, for the same
+# reason it moved for GpuInfo: `executor/client.py` and `executor/loop.py`
+# import ExecutionEvidence at MODULE scope, so on an older wheel the agent
+# raises ImportError and never registers at all. There is no silent
+# degradation to reason about, which is the one comfort in this shape of
+# floor error.
+#
 # 0.4.1 adds GpuInfo and ResourcesSpec.gpuPerTask. Both are additive wire
 # fields, so the compatibility range does not move — but the PATCH bump is
 # load-bearing, not bookkeeping. The `flashruntime-v0.4.0` tag was cut BEFORE
@@ -21,7 +34,7 @@ name = "flashruntime"
 # must pin a range that includes it. (0.3.0 was the first published release;
 # 0.1.0 and 0.2.0 were declared here but never reached PyPI.) Released from
 # the Zolli-Labs/flashml monorepo by pushing a `flashruntime-vX.Y.Z` tag.
-version = "0.4.1"
+version = "0.4.2"
 description = "Open fault-tolerant distributed ML runtime: strategy planning, job protocol, leases, checkpointing, and recovery across heterogeneous compute."
 readme = "README.md"
 # PEP 639 SPDX expression (string form) — replaces the deprecated

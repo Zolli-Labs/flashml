@@ -29,7 +29,7 @@ import threading
 import time
 from pathlib import Path
 
-from flashruntime.protocol.v1alpha1 import Lease
+from flashruntime.protocol.v1alpha1 import ExecutionEvidence, Lease
 
 from flashnode.executor.archives import (
     DEFAULT_MAX_BYTES,
@@ -38,6 +38,7 @@ from flashnode.executor.archives import (
     extract_archive_safely,
 )
 from flashnode.executor.client import CoordinatorClient, LeaseLost
+from flashnode.executor.evidence import ResourceSampler
 from flashnode.executor.runner import SubprocessRunner, TaskExecutionError
 
 log = logging.getLogger("flashnode.executor")
@@ -143,6 +144,7 @@ class ExecutorLoop:
         max_unpacked_members: int = DEFAULT_MAX_MEMBERS,
         health_check=None,
         max_consecutive_failures: int = 0,
+        sampler_factory=None,
     ):
         self.client = client
         self.node_id = node_id
@@ -185,6 +187,11 @@ class ExecutorLoop:
         # on their third unlucky job.
         self.health_check = health_check
         self.max_consecutive_failures = max_consecutive_failures
+        # Builds the per-task utilisation sampler. A factory, not an
+        # instance: a Thread runs once, so each task needs its own — and a
+        # factory is the seam that lets the suite drive the probes instead of
+        # the host's real psutil and nvidia-smi.
+        self.sampler_factory = sampler_factory or ResourceSampler
 
     # -- inputs --------------------------------------------------------------
 
@@ -336,9 +343,21 @@ class ExecutorLoop:
                     relay = _CheckpointRelay(self.client, lease, workdir / "out" / "ckpt", prefix)
                     relay.start()
 
+                # Execution evidence is measured around the RUNNER and
+                # nothing else. Folding the artifact upload into the wall
+                # clock would inflate every reading by however slow the
+                # coordinator was that minute — and inflation is the
+                # direction a liar wants, since the coordinator's own
+                # claim-to-commit elapsed is the number this is cross-checked
+                # against.
+                sampler = self.sampler_factory()
+                sampler.start()
+                started = time.monotonic()
                 try:
                     outdir = self.runner.run(payload, workdir, inputs)
                 finally:
+                    wall_seconds = time.monotonic() - started
+                    cpu_mean, gpu_mean = sampler.stop()
                     if relay is not None:
                         relay.finish()  # ship the dying attempt's last checkpoint too
 
@@ -363,7 +382,21 @@ class ExecutorLoop:
                         # nested in a subdirectory.
                         if rel == Path("metrics.json"):
                             metrics_sha = sha
-                accepted = self.client.complete(lease.lease_id, metrics_sha or "0" * 64)
+                # Read off the runner rather than inferred: only the runner
+                # knows whether a container ran at all. `getattr` with an
+                # absent default because a runner is an interface anyone may
+                # implement — one that measures nothing reports absence, and
+                # absence is a fine answer. Guessing would not be.
+                evidence = ExecutionEvidence(
+                    wall_seconds=wall_seconds,
+                    cpu_percent_mean=cpu_mean,
+                    gpu_util_percent_mean=gpu_mean,
+                    image_digest=getattr(self.runner, "last_image_digest", "") or "",
+                    exit_code=getattr(self.runner, "last_exit_code", None),
+                )
+                accepted = self.client.complete(
+                    lease.lease_id, metrics_sha or "0" * 64, evidence=evidence
+                )
                 if accepted:
                     self.tasks_accepted += 1
                 log.info(_jlog("task finished", task=lease.task_id,

@@ -10,7 +10,12 @@ name = "flashnode"
 # hardcoded __version__ that made every agent register as 0.1.0.) Released from
 # the Zolli-Labs/flashml monorepo by pushing a `flashnode-vX.Y.Z` tag, and only
 # AFTER the flashruntime floor below is on PyPI.
-version = "0.3.2"
+# 0.3.3 reports execution evidence at commit time (wall clock, mean CPU/GPU
+# utilisation, the digest of the image that ran, exit code). It needs
+# flashruntime 0.4.2's ExecutionEvidence — see the floor below. Bumped even
+# though nothing breaks: an agent whose wire behaviour differs must not share
+# a version string with one that predates it.
+version = "0.3.3"
 description = "Open host agent for the FlashML fragmented-compute network: join, benchmark, execute sandboxed ML tasks, earn contribution credits."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -38,7 +43,13 @@ dependencies = [
     # workflow's `resolvable` job runs `flashnode --help` against PyPI alone
     # precisely to catch this, so a wrong floor here fails the release rather
     # than a volunteer's machine.
-    "flashruntime>=0.4.1,<0.5",
+    # Raised again to >=0.4.2 for execution evidence, and for exactly the same
+    # import-time reason as the GPU probe above: `executor/client.py` and
+    # `executor/loop.py` import ExecutionEvidence at MODULE scope, and it does
+    # not exist in the published 0.4.1 wheel. The agent raises ImportError and
+    # never registers at all. The release workflow's `resolvable` job runs
+    # `flashnode --help` against PyPI alone precisely to catch this.
+    "flashruntime>=0.4.2,<0.5",
     "psutil>=5.9",
     "websockets>=12",
     "cryptography>=42",

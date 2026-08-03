@@ -54,6 +54,17 @@ class SubprocessRunner:
     ):
         self.allowed_modules = allowed_modules
         self.timeout_seconds = timeout_seconds
+        # What the LAST run measured, read by ExecutorLoop for
+        # ExecutionEvidence. Reset at the top of every run(): a value left
+        # over from the previous task is a real measurement of a DIFFERENT
+        # run wearing this one's name, which is fabricated evidence by
+        # another route. A runner that sets neither reports absence, which
+        # is the honest answer for a tier that measures nothing.
+        self.last_exit_code: int | None = None
+        #: Always "" here — tier 1 runs `python -m` on the host, so no image
+        #: bytes executed. Echoing the payload's image reference would claim
+        #: a container ran when none did.
+        self.last_image_digest: str = ""
 
     def run(self, payload: dict, workdir: Path, inputs: dict[str, Path]) -> Path:
         """Execute one task payload; return the output directory.
@@ -63,6 +74,8 @@ class SubprocessRunner:
           argv       ← python -m <module> --spec spec.json --out out/
           outputs    → files written under out/ (metrics.json required)
         """
+        self.last_exit_code = None
+        self.last_image_digest = ""
         # Tier 1 has no isolation, so it must never execute a caller-supplied
         # command line. Argv workloads are container-only (ArgvDockerRunner);
         # refusing here keeps a misrouted payload from silently running
@@ -100,7 +113,11 @@ class SubprocessRunner:
                 env=task_env(),
             )
         except subprocess.TimeoutExpired:
+            # Deliberately leaves last_exit_code as None: a killed process has
+            # no exit status we observed, and 0 or -9 here would both be a
+            # guess dressed as a reading.
             raise TaskExecutionError(f"task exceeded {self.timeout_seconds}s wall clock")
+        self.last_exit_code = proc.returncode
         if proc.returncode != 0:
             tail = proc.stderr.decode(errors="replace")[-800:]
             raise TaskExecutionError(f"task exited {proc.returncode}: {tail}")

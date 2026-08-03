@@ -19,6 +19,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from flashnode.executor.evidence import image_digest
 from flashnode.executor.hardening import CONTAINER_WORKDIR, container_name, harden_args
 from flashnode.executor.images import DEFAULT_ALLOWED_IMAGE_PREFIXES, image_is_allowed
 from flashnode.executor.runner import DEFAULT_ALLOWED_MODULES, TaskExecutionError
@@ -44,8 +45,14 @@ class DockerRunner:
         self.cpus = cpus
         self.memory_gb = memory_gb
         self.timeout_seconds = timeout_seconds
+        # What the LAST run measured, read by ExecutorLoop for
+        # ExecutionEvidence — see SubprocessRunner for why both reset below.
+        self.last_exit_code: int | None = None
+        self.last_image_digest: str = ""
 
     def run(self, payload: dict, workdir: Path, inputs: dict[str, Path]) -> Path:
+        self.last_exit_code = None
+        self.last_image_digest = ""
         module = payload.get("module", "")
         if module not in self.allowed_modules:
             raise TaskExecutionError(f"module {module!r} is not allowlisted — refusing to run")
@@ -110,9 +117,14 @@ class DockerRunner:
             # (a subclass of OSError). Degrade to a failed task, not a dead
             # agent — execute_one only catches TaskExecutionError/LeaseLost.
             raise TaskExecutionError(f"docker is unavailable: {exc}") from exc
+        self.last_exit_code = proc.returncode
         if proc.returncode != 0:
             tail = proc.stderr.decode(errors="replace")[-800:]
             raise TaskExecutionError(f"task exited {proc.returncode}: {tail}")
+        # Asked of the daemon, not read off the payload: the point of the
+        # field is which bytes ran here, and the payload only says which
+        # bytes were asked for. "" when the daemon will not say.
+        self.last_image_digest = image_digest(image)
         if not (outdir / "metrics.json").is_file():
             raise TaskExecutionError("task produced no metrics.json — nothing to commit")
         return outdir

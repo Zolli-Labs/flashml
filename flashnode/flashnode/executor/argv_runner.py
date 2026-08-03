@@ -20,6 +20,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from flashnode.executor.evidence import image_digest
 from flashnode.executor.hardening import container_name, harden_args
 from flashnode.executor.images import DEFAULT_ALLOWED_IMAGE_PREFIXES, image_is_allowed
 from flashnode.executor.runner import TaskExecutionError
@@ -43,8 +44,14 @@ class ArgvDockerRunner:
         self.memory_gb = memory_gb
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
+        # What the LAST run measured, read by ExecutorLoop for
+        # ExecutionEvidence — see SubprocessRunner for why both reset below.
+        self.last_exit_code: int | None = None
+        self.last_image_digest: str = ""
 
     def run(self, payload: dict, workdir: Path, inputs: dict[str, Path]) -> Path:
+        self.last_exit_code = None
+        self.last_image_digest = ""
         argv = payload.get("argv")
         if not argv or not isinstance(argv, list) or not all(isinstance(t, str) for t in argv):
             raise TaskExecutionError("payload 'argv' must be a non-empty list of strings")
@@ -105,9 +112,12 @@ class ArgvDockerRunner:
             # (a subclass of OSError). Degrade to a failed task, not a dead
             # agent — execute_one only catches TaskExecutionError/LeaseLost.
             raise TaskExecutionError(f"docker is unavailable: {exc}") from exc
+        self.last_exit_code = proc.returncode
         if proc.returncode != 0:
             tail = proc.stderr.decode(errors="replace")[-800:]
             raise TaskExecutionError(f"task exited {proc.returncode}: {tail}")
+        # Asked of the daemon, not read off the payload — see DockerRunner.
+        self.last_image_digest = image_digest(image)
 
         # metrics.json is load-bearing, not a preference: CommandRecipe sets
         # commit_key to <prefix>/metrics.json and the coordinator validates

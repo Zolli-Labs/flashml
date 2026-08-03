@@ -174,3 +174,103 @@ def test_the_runner_defaults_to_the_real_subprocess_at_call_time(monkeypatch):
     )
     assert len(probe_gpus()) == 2
     assert calls and calls[0][0] == "nvidia-smi"
+
+
+# ---------------------------------------------------------------------------
+# Utilisation: the one field of ExecutionEvidence that partially covers GPU
+# work, which slice 3 cannot verify at all (design §3.2, §8.6).
+#
+# The contract that matters here is the difference between "no driver" and
+# "a driver reporting an idle card". The first is None and says nothing; the
+# second is 0.0 and is the strongest signal this probe produces. A probe that
+# returned 0.0 for both would report every CPU-only volunteer as a GPU host
+# that did nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_utilisation_is_the_mean_across_this_hosts_devices():
+    from flashnode.inventory.gpu import probe_gpu_utilisation
+
+    assert probe_gpu_utilisation(run=_runner(b"90\n70\n")) == 80.0
+
+
+def test_a_single_busy_card_reports_its_own_number():
+    from flashnode.inventory.gpu import probe_gpu_utilisation
+
+    assert probe_gpu_utilisation(run=_runner(b"73\n")) == 73.0
+
+
+def test_an_idle_card_reports_zero_and_not_none():
+    """THE distinction. A driver that answers "0" has been read successfully
+    and the card was idle — that is evidence. Returning None here would
+    discard the single most useful reading this probe can take."""
+    from flashnode.inventory.gpu import probe_gpu_utilisation
+
+    assert probe_gpu_utilisation(run=_runner(b"0\n")) == 0.0
+
+
+def test_no_driver_reports_none_and_never_zero():
+    """The mirror. A machine with no GPU has NOT been measured at 0% — it has
+    not been measured. Zero here would frame every CPU volunteer as an idle
+    GPU host."""
+    from flashnode.inventory.gpu import probe_gpu_utilisation
+
+    def run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'nvidia-smi'")
+
+    assert probe_gpu_utilisation(run=run) is None
+
+
+@pytest.mark.parametrize(
+    "stdout, returncode",
+    [
+        pytest.param(b"", 9, id="non-zero-exit"),
+        pytest.param(b"", 0, id="empty-output"),
+        pytest.param(b"[N/A]\n", 0, id="driver-placeholder"),
+        pytest.param(b"[Not Supported]\n", 0, id="unsupported-placeholder"),
+        pytest.param(b"No devices were found\n", 0, id="prose-error-line"),
+        pytest.param(b"9999\n", 0, id="out-of-range"),
+        pytest.param(b"-3\n", 0, id="negative"),
+    ],
+)
+def test_anything_unreadable_reports_none(stdout, returncode):
+    from flashnode.inventory.gpu import probe_gpu_utilisation
+
+    assert probe_gpu_utilisation(run=_runner(stdout, returncode=returncode)) is None
+
+
+def test_one_unreadable_card_costs_that_card_and_not_the_reading():
+    """Same invariant as `probe_gpus`: a row that will not parse is dropped,
+    and the devices that did parse are still reported."""
+    from flashnode.inventory.gpu import probe_gpu_utilisation
+
+    assert probe_gpu_utilisation(run=_runner(b"100\n[N/A]\n50\n")) == 75.0
+
+
+def test_the_utilisation_query_is_the_documented_one_and_is_bounded_in_time():
+    from flashnode.inventory.gpu import probe_gpu_utilisation
+
+    run = _runner(b"42\n")
+    probe_gpu_utilisation(run=run)
+    argv, kwargs = run.calls[0]
+    assert argv[0] == "nvidia-smi"
+    assert "--query-gpu=utilization.gpu" in argv
+    assert "--format=csv,noheader,nounits" in argv
+    assert kwargs["timeout"] == 5  # sampled during a run; must never wedge it
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        lambda argv, **kw: (_ for _ in ()).throw(RuntimeError("kaboom")),
+        lambda argv, **kw: (_ for _ in ()).throw(OSError("permission denied")),
+        lambda argv, **kw: None,
+        lambda argv, **kw: object(),
+    ],
+)
+def test_the_utilisation_probe_never_raises(boom):
+    """This runs on a sampler thread beside a live task. A raise here must
+    cost a field, never the run."""
+    from flashnode.inventory.gpu import probe_gpu_utilisation
+
+    assert probe_gpu_utilisation(run=boom) is None
