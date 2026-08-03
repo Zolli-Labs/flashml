@@ -96,7 +96,13 @@ class ResourcesSpec(BaseModel):
 
 
 class PlacementSpec(BaseModel):
-    pool: Literal["any", "local", "edge", "standard-cloud", "secure-cloud"] = "any"
+    #: "any" (the default, and every pre-pools job) or a team-pool id minted
+    #: by the control plane. Until 0.4.3 this was a closed Literal of
+    #: infrastructure pool names that nothing ever read; widened when it
+    #: gained its first reader. Non-"any" makes every task of the job carry
+    #: payload["pool"] (recipes stamp it) and place only on nodes listing
+    #: that id in capabilities.pools.
+    pool: str = "any"
     architectures: list[Literal["amd64", "arm64"]] = Field(default_factory=lambda: ["amd64"])
 
 
@@ -309,6 +315,15 @@ class NodeCapabilities(BaseModel):
     #: this runtime cannot parse — never a guess. Placement reads the LENGTH
     #: of this list and nothing else in v1.
     gpus: list[GpuInfo] = Field(default_factory=list)
+    #: Team pools this node serves, as pool ids minted by the cloud control
+    #: plane. Stamped SERVER-SIDE by the cloud API's agent proxy from the
+    #: machine owner's memberships — an agent's self-reported value is
+    #: overwritten there, so the field is only as trustworthy as the
+    #: operator fronting registration. Empty means "serves no pool", and the
+    #: seventh placement gate refuses pool-scoped work (fail closed). NOT
+    #: the same thing as NodeRegistration.pool (singular), a deployment
+    #: profile label that predates teams; the two never interact.
+    pools: list[str] = Field(default_factory=list)
     os: str = ""
     architecture: str = ""
 
@@ -325,6 +340,14 @@ class NodeRegistration(BaseModel):
     #: every already-deployed agent is excluded from argv work until it is
     #: upgraded and explicitly opted in (security fields fail closed).
     argv_capable: bool = False
+    #: The operator explicitly opted this host into executing POOL-SCOPED
+    #: argv payloads without a container (`flashnode work --runner trusted`).
+    #: Defaults False so every existing agent is excluded until its owner
+    #: opts in (security fields fail closed). Distinct from argv_capable,
+    #: which asserts the CONTAINERISED argv contract — this asserts the
+    #: opposite: no sandbox, trusted-pool work only. The scheduler requires
+    #: pool + allowFallback + this flag together; any one alone places nothing.
+    unsandboxed_argv_capable: bool = False
     #: This node can run "module" (python -m <allowlisted module>) tasks.
     #: Defaults True — unlike argv_capable this is an AVAILABILITY gate, not
     #: a safety one: a module task placed on an incapable node just wastes
@@ -354,6 +377,12 @@ class NodeHeartbeat(BaseModel):
     node_id: str
     timestamp: datetime = Field(default_factory=utcnow)
     status: Literal["online", "draining", "terminating"] = "online"
+    #: Optional pool-membership refresh, stamped by the cloud API on the
+    #: heartbeat proxy so joining or leaving a pool reaches placement
+    #: without an agent restart. None means "no statement" — the
+    #: coordinator keeps whatever registration said. A list (even empty)
+    #: replaces `capabilities.pools` wholesale. Agents never set this.
+    pools: list[str] | None = None
 
 
 class NodeStatusView(BaseModel):

@@ -113,11 +113,36 @@ class IsolationAwarePlacement(PlacementPolicy):
 
     A second, independent gate applies to tasks carrying an `argv` payload
     (arbitrary user command lines): the claiming node must advertise
-    `argv_capable is True`. This is checked BEFORE the isolation block's
-    `allowFallback` waiver below, and the waiver does not apply to it — a
-    submitter setting `allowFallback: true` waives the sandbox-tier
-    requirement only, never the argv-runner requirement, or arbitrary argv
-    could land on a node with no argv runner at all.
+    `argv_capable is True` — the containerised argv contract, always
+    acceptable. This is checked BEFORE the isolation block's `allowFallback`
+    waiver below, and the waiver does not apply to it directly — a submitter
+    setting `allowFallback: true` waives the sandbox-tier requirement only,
+    never the argv-runner requirement on its own, or arbitrary argv could
+    land on a node with no argv runner at all.
+
+    A node lacking `argv_capable` has exactly one alternative: trusted-pool
+    placement, for a host whose OPERATOR opted it into running pool argv
+    work unsandboxed (`flashnode work --runner trusted`,
+    `NodeRegistration.unsandboxed_argv_capable`). Three legs, ALL required,
+    each `is`-checked, each fails closed — any one alone places nothing:
+
+    - The task is pool-scoped: `payload["pool"]` is a non-empty `str`.
+    - Its submitter waived the tier: `payload["isolation"]` is a `dict` and
+      its `allowFallback` is exactly `True` — the same waiver the isolation
+      block reads below, checked again here rather than assumed, because
+      this gate must not depend on evaluation order elsewhere.
+    - The node opted in: `unsandboxed_argv_capable is True` on the node view
+      — a truthy stand-in (`1`, `"true"`) does NOT count, matching every
+      other boolean capability in this class.
+
+    The pool leg here is a guard, not the boundary: the seventh gate below
+    independently confines the task to pool members regardless of this one.
+    This leg exists so that a waiver which somehow reached placement without
+    a pool — `CommandRecipe` now accepts `allowFallback` only when
+    `placement.pool` is set, coupling the waiver to a pool at submission
+    time, so nothing upstream should ever produce one without a pool — still
+    unlocks nothing here either. The gate does not trust another layer to
+    have already enforced the rule it is itself stating.
 
     A third gate applies to tasks carrying a `module` payload (the
     "python -m <allowlisted module>" tier): the claiming node must not be
@@ -254,14 +279,80 @@ class IsolationAwarePlacement(PlacementPolicy):
     already holds the other half of a verification pair — and the point of
     the pair is that the node cannot tell it is in one.
 
+    A seventh gate applies to tasks whose payload names a `pool`: the
+    claiming node's `capabilities.pools` must list it. It takes the
+    argv/local-data/gpu/exclude_nodes polarity — **fail closed** — and for
+    the sharpest reason of the seven: pool jobs are precisely the ones that
+    CARRY `allowFallback`, so a task that slipped this gate would not just
+    misplace, it would run UNSANDBOXED on a machine outside the trust
+    boundary the waiver assumed. Checked before the isolation block for the
+    same reason the gates above are — but here the ordering is load-bearing
+    twice over, since this gate and the waiver interact directly rather than
+    merely sharing a payload:
+
+    - The requirement must be a non-empty `str`. `None` means no pool was
+      asked for and the task places like any pre-pools job; anything else
+      typed (an `int`, a `list`, `True`, or the empty string) is a
+      type-confused requirement and makes the task ineligible everywhere,
+      exactly as a non-`int` `gpus` or a non-list `exclude_nodes` does.
+    - `capabilities` may be absent or type-confused; read as membership in
+      no pool rather than allowed to raise, via `isinstance`, not
+      `capabilities.get(...) or {}` — a string `capabilities` value has no
+      `.get` and must fail closed rather than crash the predicate, the same
+      pattern the gpu gate uses for the same reason.
+    - The advertisement must be a genuine *list* of names. Absent, `None`, a
+      bare string, a dict, or a bare `int` all count as serving no pool. A
+      bare string deserves the same suspicion `local_datasets` earns:
+      substring membership would let one node's advertisement quietly match
+      a pool it never joined.
+    - Every member must be a `str`. A `None`, an `int`, or a nested object
+      means the stamp was built wrong, and the pool it meant to serve is
+      exactly the one a plain membership test would then get wrong — the
+      same shape of failure `exclude_nodes` refuses for the same reason.
+      The whole node is refused rather than the one bad member ignored.
+
+    `allowFallback` does not waive this gate, and this is the one case in
+    the class where saying so is not enough — the test that pins it
+    (`test_allow_fallback_does_not_waive_the_pool_gate`) is the argument
+    itself, not a restatement of it. Every other gate's waiver-immunity is
+    "the waiver covers the sandbox tier and nothing else, so it has nothing
+    to say here." This gate's is stronger: pool-scoped jobs are the ones
+    that set `allowFallback: true` in the first place, trading the
+    sandboxed-container guarantee for a trusted-pool machine that runs their
+    argv directly. If this gate waived on `allowFallback`, the exact tasks
+    carrying that trade would be the ones allowed to escape the pool
+    boundary that made the trade acceptable, and they would land unsandboxed
+    on a stranger's machine — the design's worst failure mode, reached by
+    reading the one waiver already present on every task this gate exists to
+    confine.
+
     Everything genuinely standard keeps the fail-open placement default."""
 
     def eligible(self, task: TaskSpec, node: NodeView) -> bool:
         # Checked before the allowFallback waiver below: the waiver relaxes
         # the sandbox-tier requirement, and must never be readable as
         # permission to run argv on a node with no argv runner.
-        if "argv" in task.payload and node.get("argv_capable") is not True:
-            return False
+        if "argv" in task.payload:
+            if node.get("argv_capable") is True:
+                pass  # the containerised argv contract — always acceptable
+            else:
+                # Trusted-pool alternative: the host OPERATOR opted into
+                # unsandboxed pool argv (`flashnode work --runner trusted`).
+                # Three legs, each `is`-checked, each fails closed. The pool
+                # leg here is a guard, not the boundary — the seventh gate
+                # independently confines the task to pool members; this leg
+                # exists so a waiver that somehow escaped compile/recipe
+                # coupling still unlocks nothing outside a pool.
+                task_pool = task.payload.get("pool")
+                isolation_payload = task.payload.get("isolation")
+                if not (
+                    isinstance(task_pool, str)
+                    and task_pool
+                    and isinstance(isolation_payload, dict)
+                    and isolation_payload.get("allowFallback") is True
+                    and node.get("unsandboxed_argv_capable") is True
+                ):
+                    return False
         # Availability gate, mirrored polarity from the argv gate above —
         # see the class docstring. An argv-only volunteer poisons every
         # module job in the pool otherwise: it claims, ArgvDockerRunner
@@ -322,6 +413,30 @@ class IsolationAwarePlacement(PlacementPolicy):
                     return False  # cannot answer "is this you?" ⇒ do not risk it
                 if node_id in excluded:
                     return False
+        # Fail-closed like every gate above, and checked before the
+        # allowFallback waiver below for the sharpest reason yet: pool jobs
+        # are exactly the ones that CARRY the waiver, so a pool task that
+        # slipped this gate would run unsandboxed on a machine outside the
+        # trust boundary that made the waiver acceptable.
+        required_pool = task.payload.get("pool")
+        if required_pool is not None:
+            if not isinstance(required_pool, str) or not required_pool:
+                return False  # type-confused requirement ⇒ fail closed, no crash
+            capabilities = node.get("capabilities")
+            # isinstance, not `or {}` — a string capabilities value has no
+            # `.get` and must fail closed rather than crash the predicate.
+            advertised = (
+                capabilities.get("pools") if isinstance(capabilities, dict) else None
+            )
+            if not isinstance(advertised, list):
+                return False  # absent/type-confused ⇒ serves no pool
+            if not all(isinstance(p, str) for p in advertised):
+                # A non-name member means the stamp was built wrong; the pool
+                # it meant to serve is precisely what a membership test would
+                # now get wrong. Refuse the node, not the one member.
+                return False
+            if required_pool not in advertised:
+                return False
         isolation = task.payload.get("isolation")
         if isolation is None:
             return True  # no isolation payload ⇒ standard, runs anywhere

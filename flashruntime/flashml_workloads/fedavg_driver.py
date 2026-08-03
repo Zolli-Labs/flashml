@@ -142,7 +142,8 @@ class Coordinator(Protocol):
 
 def _round_body(round_idx: int, num_shards: int, worker_params: dict,
                 weights_uri: str | None, lease_seconds: float,
-                image: str, isolation_tier: str, allow_fallback: bool) -> dict:
+                image: str, isolation_tier: str, allow_fallback: bool,
+                pool: str | None = None) -> dict:
     params: dict[str, Any] = dict(worker_params)
     params.update({"round": round_idx, "num_shards": num_shards,
                    "lease_seconds": lease_seconds})
@@ -153,7 +154,7 @@ def _round_body(round_idx: int, num_shards: int, worker_params: dict,
         raise ValueError(
             f"image must be 'repository:tag' with a pinned tag, got {image!r}"
         )
-    return {
+    body = {
         "apiVersion": "flashml.dev/v1alpha1", "kind": "Job",
         "metadata": {"name": f"fedavg-r{round_idx:03d}"},
         "spec": {
@@ -163,6 +164,17 @@ def _round_body(round_idx: int, num_shards: int, worker_params: dict,
             "workload": {"type": "federated_averaging", "parameters": params},
         },
     }
+    if pool is not None and pool != "any":
+        # Same rule as the four expander stamps in recipes/command.py and
+        # service/modea.py: absent stays absent, and "any" is never stamped
+        # explicitly — the pool placement gate treats a stamped "any" as an
+        # ordinary pool id, which would make the round's tasks unplaceable
+        # everywhere rather than placeable anywhere. `None` (the caller made
+        # no pool statement) and the literal `"any"` (the caller stated the
+        # public queue explicitly) both mean "leave `placement` absent" —
+        # the default `PlacementSpec.pool` picks up "any" on its own.
+        body["spec"]["placement"] = {"pool": pool}
+    return body
 
 
 def _default_task_ids(num_shards: int) -> list[str]:
@@ -433,6 +445,7 @@ def run_fedavg(
     image: str = DEFAULT_IMAGE,
     isolation_tier: str = "standard",
     allow_fallback: bool = False,
+    pool: str | None = None,
     poll_attempts: int = 4,
     poll_backoff_s: float = 0.5,
     prior_job_ids: Sequence[tuple[int, str]] | None = None,
@@ -448,6 +461,17 @@ def run_fedavg(
     the same "two places, each correct in isolation" shape as the task-module
     allowlist drift that already caused an outage here.
 
+    `pool` is caller-settable for the same reason: the cloud control plane
+    owns pool ids, not this driver, so it must be free to say which pool (or
+    none) each round belongs to. `None` means the public queue, exactly as
+    before this parameter existed — every round of every run before pools
+    landed built a `placement`-less body, and that must stay byte-identical.
+    Round 0 and every later round go through the same `_round_body` call
+    inside this loop, so a pool named for round 0 travels to round 1, 2, …
+    without the caller repeating itself — the whole point being that pool
+    confinement must survive the round boundary, not just the round the job
+    was first submitted for.
+
     `build_round` replaces how a round becomes a job. The default builds the
     built-in `federated_averaging` body, whose tasks run
     `flashml_workloads.fedavg_worker`. A caller that wants the *user's own*
@@ -457,9 +481,9 @@ def run_fedavg(
     resume) is unchanged, because none of it depends on what ran inside the
     round, only on the task ids it produced and the `metrics.json` /
     `delta.json` pair each one committed. `worker_params`, `image`,
-    `isolation_tier`, `allow_fallback` and `lease_seconds` are inputs to the
-    *default* builder and are ignored when `build_round` is supplied — the
-    builder already knows all of it.
+    `isolation_tier`, `allow_fallback`, `pool` and `lease_seconds` are
+    inputs to the *default* builder and are ignored when `build_round` is
+    supplied — the builder already knows all of it.
 
     `initial_weights` may be `{}`, and that is not the same as "start from
     zeros": it means the driver holds no weights yet, so round 0's reduced
@@ -497,7 +521,7 @@ def run_fedavg(
             plan: RoundPlan = {
                 "body": _round_body(r, num_shards, worker_params, weights_uri,
                                     lease_seconds, image, isolation_tier,
-                                    allow_fallback),
+                                    allow_fallback, pool),
                 "task_ids": _default_task_ids(num_shards),
             }
         else:

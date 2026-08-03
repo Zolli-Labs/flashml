@@ -171,6 +171,8 @@ def expand_tasks(job_id: str, spec: JobSpec) -> list[TaskSpec]:
         }
         if checkpoint is not None:
             payload["checkpoint"] = checkpoint
+        if spec.spec.placement.pool != "any":
+            payload["pool"] = spec.spec.placement.pool
         tasks.append(
             TaskSpec(
                 task_id=task_id,
@@ -208,6 +210,17 @@ def _expand_kmeans(job_id: str, spec: JobSpec) -> list[TaskSpec]:
     tasks = []
     for i, shard_uri in enumerate(shards):
         task_id = f"it{iteration:02d}-shard-{i:03d}"
+        payload = {
+            "module": "flashml_workloads.kmeans_shard",
+            "params": {"centroids": centroids},
+            "inputs": {"shard": shard_uri},
+            "output_prefix": f"jobs/{job_id}/{task_id}/",
+            "task_id": task_id,
+            "image": spec.spec.image.reference,
+            "isolation": isolation,
+        }
+        if spec.spec.placement.pool != "any":
+            payload["pool"] = spec.spec.placement.pool
         tasks.append(
             TaskSpec(
                 task_id=task_id,
@@ -215,15 +228,7 @@ def _expand_kmeans(job_id: str, spec: JobSpec) -> list[TaskSpec]:
                 commit_key=f"jobs/{job_id}/{task_id}/metrics.json",
                 max_attempts=spec.spec.retryPolicy.maxTaskAttempts,
                 lease_seconds=_lease_seconds(p, 60.0),
-                payload={
-                    "module": "flashml_workloads.kmeans_shard",
-                    "params": {"centroids": centroids},
-                    "inputs": {"shard": shard_uri},
-                    "output_prefix": f"jobs/{job_id}/{task_id}/",
-                    "task_id": task_id,
-                    "image": spec.spec.image.reference,
-                    "isolation": isolation,
-                },
+                payload=payload,
             )
         )
     return tasks
@@ -273,6 +278,17 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
         params = {k: p[k] for k in worker_keys}
         params.update({"round": int(p.get("round", 0)),
                        "shard": shard, "num_shards": num_shards})
+        payload = {
+            "module": "flashml_workloads.fedavg_worker",
+            "params": params,
+            "inputs": inputs,
+            "output_prefix": f"jobs/{job_id}/{task_id}/",
+            "task_id": task_id,
+            "image": spec.spec.image.reference,
+            "isolation": isolation,
+        }
+        if spec.spec.placement.pool != "any":
+            payload["pool"] = spec.spec.placement.pool
         tasks.append(
             TaskSpec(
                 task_id=task_id,
@@ -280,15 +296,7 @@ def _expand_fedavg(job_id: str, spec: JobSpec) -> list[TaskSpec]:
                 commit_key=f"jobs/{job_id}/{task_id}/metrics.json",
                 max_attempts=spec.spec.retryPolicy.maxTaskAttempts,
                 lease_seconds=_lease_seconds(p, 120.0),
-                payload={
-                    "module": "flashml_workloads.fedavg_worker",
-                    "params": params,
-                    "inputs": inputs,
-                    "output_prefix": f"jobs/{job_id}/{task_id}/",
-                    "task_id": task_id,
-                    "image": spec.spec.image.reference,
-                    "isolation": isolation,
-                },
+                payload=payload,
             )
         )
     return tasks
@@ -633,6 +641,19 @@ def build_router(state: ModeAState) -> APIRouter:
         if entry is None:
             raise HTTPException(status_code=404, detail=f"unknown node {node_id} — register first")
         entry.last_heartbeat = hb.timestamp
+        if hb.pools is not None:
+            # Server-stamped membership refresh (cloud proxy). A list, even
+            # empty, replaces the registration's pools wholesale; None means
+            # no statement. Replace the capabilities object rather than
+            # mutating it in place so the registration model stays the
+            # single source the claim node view dumps from.
+            entry.registration = entry.registration.model_copy(
+                update={
+                    "capabilities": entry.registration.capabilities.model_copy(
+                        update={"pools": list(hb.pools)}
+                    )
+                }
+            )
         return {"status": "ok"}
 
     @router.get("/nodes")
@@ -657,6 +678,7 @@ def build_router(state: ModeAState) -> APIRouter:
             "node_id": req.node_id,
             "sandbox_capable": entry.registration.sandbox_capable,
             "argv_capable": entry.registration.argv_capable,
+            "unsandboxed_argv_capable": entry.registration.unsandboxed_argv_capable,
             "module_capable": entry.registration.module_capable,
             # Names only — the host paths behind them never reach us, and the
             # placement gate needs the names to place local-data work at all.
