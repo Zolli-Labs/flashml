@@ -62,7 +62,8 @@ def _parse_k8s_memory(value: str) -> int:
 def discover(node_id: str, kubernetes_node: str,
              node_meta: dict | None = None,
              argv_capable: bool = False,
-             module_capable: bool = True) -> NodeRegistration:
+             module_capable: bool = True,
+             unsandboxed_argv_capable: bool = False) -> NodeRegistration:
     """Build the registration payload. `node_meta` is the Kubernetes Node
     object (status/metadata) when the agent has API access; None degrades to
     host-level probes only."""
@@ -127,6 +128,8 @@ def discover(node_id: str, kubernetes_node: str,
         # coordinator's module gate is fail-open (unlike argv_capable), so
         # the default here matches every caller that doesn't pass it.
         module_capable=module_capable,
+        # Set by the agent only for `--runner trusted` — never inferred.
+        unsandboxed_argv_capable=unsandboxed_argv_capable,
         # The LABELS of the datasets this host owner lends to tasks
         # (FLASHNODE_LOCAL_DATA) — never the paths. The coordinator needs the
         # names to place a job that requires `patients` on a machine that has
