@@ -670,6 +670,7 @@ def build_router(state: ModeAState) -> APIRouter:
             "node_id": req.node_id,
             "sandbox_capable": entry.registration.sandbox_capable,
             "argv_capable": entry.registration.argv_capable,
+            "unsandboxed_argv_capable": entry.registration.unsandboxed_argv_capable,
             "module_capable": entry.registration.module_capable,
             # Names only — the host paths behind them never reach us, and the
             # placement gate needs the names to place local-data work at all.
