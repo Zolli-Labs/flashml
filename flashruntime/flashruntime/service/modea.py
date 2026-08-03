@@ -36,6 +36,7 @@ import flashruntime.recipes.command  # noqa: F401 — registers the "command" re
 from flashruntime.leases import LeaseManager
 from flashruntime.protocol.v1alpha1 import (
     ArtifactRecord,
+    ExecutionEvidence,
     JobSpec,
     NodeHeartbeat,
     NodeRegistration,
@@ -350,6 +351,20 @@ class ClaimRequest(BaseModel):
 
 class CompleteRequest(BaseModel):
     output_sha256: str
+    #: What the agent measured about the run it is committing. **Optional,
+    #: and it must stay optional.** Every agent deployed today predates this
+    #: field; making it required would 422 every completion in the fleet the
+    #: moment this coordinator shipped, and the fleet is not reachable to
+    #: upgrade first. Same fail-safe polarity as `NodeRegistration
+    #: .module_capable` and for the same reason — availability, not security:
+    #: an absent block costs a verification signal, a required one costs
+    #: every task.
+    #:
+    #: This coordinator ACCEPTS AND IGNORES it. It keeps no verifications
+    #: ledger, and inventing somewhere to put this would put the runtime in
+    #: the business of judging its own volunteers; the cloud API reads it and
+    #: records a verdict. Absent evidence is `unknown` there — never `pass`.
+    evidence: ExecutionEvidence | None = None
 
 
 class FailRequest(BaseModel):

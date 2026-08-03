@@ -427,6 +427,60 @@ class TaskAttempt(BaseModel):
     accepted: bool = False
 
 
+class ExecutionEvidence(BaseModel):
+    """What the agent says about the run it is committing. **Evidence, never
+    proof** — the agent is the untrusted party, so every field here is
+    something a liar could fabricate. Its value is that a liar must now keep
+    two stories straight: these numbers have to stay consistent with the
+    elapsed time the *coordinator* measured between claim and commit, which
+    the agent does not control.
+
+    Optional on `CompleteRequest`, and it must stay optional — see the note
+    there.
+
+    NONE MEANS "NOT MEASURED". ZERO MEANS "MEASURED, AND IT WAS ZERO". These
+    are different facts and must never collapse onto one value: 0% GPU on a
+    task that asked for a GPU is the strongest single signal this block
+    carries, and a host with no sampler at all is no signal whatsoever. An
+    agent that cannot read a value sends `None`; a fabricated 0.0 turns "we
+    could not look" into "this node did nothing" and gets an honest
+    volunteer flagged. `image_digest` uses `""` for the same purpose, matching
+    `GpuInfo`'s string fields.
+
+    DELIBERATELY UNCONSTRAINED. No `ge=0`, no upper bound, no format check on
+    the digest. A validator here would let an agent's own self-report 422 the
+    agent's own work — inverting a design in which nothing is ever enforced
+    and everything is at most flagged. An implausible reading is worth more
+    recorded than refused, and refusing it mostly teaches a liar which values
+    pass.
+
+    Fields:
+    - `wall_seconds` — the agent's own clock around the run, excluding input
+      download and output upload. Cross-checked against coordinator-observed
+      elapsed, never trusted alone.
+    - `cpu_percent_mean` / `gpu_util_percent_mean` — mean utilisation over
+      the run, sampled by the agent. HOST-WIDE, not task-scoped: a volunteer
+      machine has other things running on it, so a high reading is weak
+      evidence and a *low* one is the interesting direction.
+    - `image_digest` — which image bytes actually executed, as the host
+      resolved them. `""` for a tier that ran no container at all.
+    - `exit_code` — the process/container exit status. On the reference agent
+      this is 0 whenever it is present at all, because a non-zero exit fails
+      the attempt and never reaches the commit path; it is carried so a
+      runner that commits partial results stays expressible, and so absence
+      still distinguishes an agent that measured from one that did not.
+
+    No `schema_version`: like `GpuInfo` and `CheckpointPart`, this is a
+    nested element of a wire message, not a wire message of its own.
+    """
+
+    wall_seconds: float | None = None
+    cpu_percent_mean: float | None = None
+    gpu_util_percent_mean: float | None = None
+    image_digest: str = ""
+    exit_code: int | None = None
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint manifests (additive, July 2026)
 #
