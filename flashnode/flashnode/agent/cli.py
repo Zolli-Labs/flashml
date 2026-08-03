@@ -174,9 +174,10 @@ def _work(args: list[str]) -> int:
     )
     parser.add_argument(
         "--runner",
-        choices=["subprocess", "docker", "argv"],
+        choices=["subprocess", "docker", "argv", "trusted"],
         default=os.environ.get("FLASHNODE_RUNNER", "subprocess"),
-        help="task execution tier (docker/argv need the docker CLI on PATH)",
+        help="task execution tier (docker/argv need the docker CLI on PATH; "
+             "trusted runs pool jobs unsandboxed — opt-in only)",
     )
     parser.add_argument("--max-tasks", type=int, default=None)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
@@ -260,6 +261,19 @@ def _work(args: list[str]) -> int:
                     os.environ.get("FLASHNODE_MAX_OUTPUT_BYTES", str(2 * 1024**3))
                 ),
             )
+    elif opts.runner == "trusted":
+        # Deliberately OUTSIDE the ("docker", "argv") branch above: this
+        # tier has no container and no docker CLI dependency, so the docker
+        # doctor gate has nothing to check — same as subprocess. The only
+        # gate here is the operator typing --runner trusted at all.
+        from flashnode.executor.trusted_runner import TrustedArgvRunner
+
+        print(
+            "trusted runner: pool jobs from your team run UNSANDBOXED on this\n"
+            "machine — no container, no network isolation. Only continue if\n"
+            "every member of your pool is someone you trust to run code here."
+        )
+        runner = TrustedArgvRunner()
 
     workdir_base = os.environ.get("FLASHNODE_WORKDIR") or None
 
@@ -280,6 +294,11 @@ def _work(args: list[str]) -> int:
         # tasks burn every attempt against ArgvDockerRunner's payload
         # rejection before the job ever fails for real.
         module_capable=(opts.runner != "argv"),
+        # Set true ONLY by the explicit --runner trusted opt-in, never
+        # inferred — the scheduler's placement gate treats this field as
+        # fail-closed (flashruntime.scheduler), so a node that merely has a
+        # shell available must not advertise it.
+        unsandboxed_argv_capable=(opts.runner == "trusted"),
     )
     client.register(registration)
     from flashnode.doctor import NON_BLOCKING_STATUSES, run_checks
