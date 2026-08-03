@@ -34,6 +34,7 @@ class TrustedArgvRunner:
 
     def run(self, payload: dict, workdir: Path, inputs: dict[str, Path]) -> Path:
         self.last_exit_code = None
+        workdir = Path(workdir)
         argv = payload.get("argv")
         if not isinstance(argv, list) or not argv or not all(
             isinstance(a, str) for a in argv
@@ -74,4 +75,9 @@ class TrustedArgvRunner:
             raise TaskExecutionError(
                 f"task exited {proc.returncode}: {tail}"
             )
+        if not (outdir / "metrics.json").is_file():
+            # Same rule as both sibling runners: an exit-0 workload that
+            # wrote no metrics is a task failure HERE, attributably — not a
+            # mysterious commit rejection three hops later.
+            raise TaskExecutionError("task produced no metrics.json — nothing to commit")
         return outdir

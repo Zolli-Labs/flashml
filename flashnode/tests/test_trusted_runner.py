@@ -65,13 +65,25 @@ def test_environment_is_scrubbed(tmp_path, monkeypatch):
     monkeypatch.setenv("FLASHNODE_MACHINE_TOKEN", "fmk_secret")
     probe = tmp_path / "probe.py"
     probe.write_text(
-        "import os, pathlib, sys\n"
+        "import json, os, pathlib, sys\n"
         "out = pathlib.Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)\n"
         "(out / 'env.txt').write_text(str('FLASHNODE_MACHINE_TOKEN' in os.environ))\n"
+        "(out / 'metrics.json').write_text(json.dumps({'env_scrubbed': True}))\n"
     )
     runner = TrustedArgvRunner()
     runner.run(_payload(["python", str(probe), "/work/out"]), tmp_path, {})
     assert (tmp_path / "out" / "env.txt").read_text() == "False"
+
+
+def test_exit_zero_without_metrics_json_raises(tmp_path):
+    """Mirrors SubprocessRunner/ArgvDockerRunner: metrics.json is
+    load-bearing; exit 0 without it is a task error, not a success."""
+    probe = tmp_path / "probe.py"
+    probe.write_text("print('did nothing')\n")
+    runner = TrustedArgvRunner()
+    with pytest.raises(TaskExecutionError, match="metrics.json"):
+        runner.run(_payload(["python", str(probe)]), tmp_path, {})
+    assert runner.last_exit_code == 0
 
 
 def test_image_digest_is_always_empty():
