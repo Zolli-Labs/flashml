@@ -196,19 +196,51 @@ kill` **against the running container by name** — the cap is enforced on the
 container itself, not merely by the local `docker` client giving up and
 walking away.
 
-**Only sandboxed tasks land here at all.** A job submitted for volunteer
-placement must declare `isolation.tier: "sandboxed"`; the coordinator rejects
-a command job that tries to set `allowFallback: true` to waive that
-requirement. A submitting user can never downgrade the isolation their own
-code runs under — that decision belongs to the node operator (you) and,
-separately, to whoever runs the coordinator. (A coordinator operator running
-a fully trusted fleet can opt out of the tier requirement server-side with
+**Only sandboxed tasks land on an `--runner argv` machine.** A job submitted
+for open-pool placement (no `placement.pool` set) must declare
+`isolation.tier: "sandboxed"`; the coordinator rejects a command job that
+tries to set `allowFallback: true` with no pool attached. Outside a pool, a
+submitting user can never downgrade the isolation their own code runs
+under — that decision belongs to the node operator (you) and, separately, to
+whoever runs the coordinator. (A coordinator operator running a fully
+trusted fleet can opt out of the tier requirement server-side with
 `FLASHML_ALLOW_UNSANDBOXED_ARGV=1`; a job submitter has no equivalent
-override.) Correspondingly, `--runner argv` is the only runner that
-advertises sandbox+argv capability to the coordinator: `--runner subprocess`
-(the default) and `--runner docker` never accept argv-shaped payloads, so a
-volunteer who starts the agent without `--runner argv` is never handed
-arbitrary code in the first place.
+override outside a pool.) Correspondingly, `--runner argv` is the only
+runner that advertises sandbox+argv capability to the coordinator:
+`--runner subprocess` (the default) and `--runner docker` never accept
+argv-shaped payloads, so a volunteer who starts the agent without
+`--runner argv` is never handed arbitrary code in the first place.
+
+### Team pools: `--runner trusted`
+
+There is one coupled exception to the paragraph above, and it exists only
+inside a pool. A job scoped to a pool (`placement.pool` set) *can* set
+`allowFallback: true`, and a node in that same pool *can* opt in to run it
+unsandboxed — no container, no `--network none`, none of the flags in
+[Isolation, precisely](#isolation-precisely) below. This is `flashnode work
+--runner trusted`, and it is a different trust decision from everything
+above: you are not trusting an anonymous submitter behind a sandbox, you are
+trusting the specific people your pool operator invited, running their code
+directly on your machine.
+
+Say it plainly: **unsandboxed means unsandboxed.** A pool job under
+`--runner trusted` can read and write anything your user account can, reach
+your network, and outlive its declared limits the way a sandboxed job
+cannot. Only run this for a pool you would hand a shell account to. The
+coordinator confines what reaches you either way — it refuses every
+non-pool task to a trusted-tier worker outright (fail closed, the same
+placement gate as everything else in this doc), so a machine running
+`--runner trusted` never receives a stranger's job, only its own pool's. Run
+`flashnode work --runner trusted --coordinator https://<coordinator>` to opt
+in; there is no environment variable equivalent, and the command prints its
+own unsandboxed warning every time it starts.
+
+This tier is a reasonable default for hosts that structurally cannot run
+`--runner argv` at all — a Colab notebook or a rented pod, neither of which
+can nest a Docker daemon of their own to sandbox into. If your pool operator
+sent you a link to a hosted console, its own docs page and guides cover the
+exact commands for those hosts; nothing further to say about it here beyond
+what a pool operator's invite already explains.
 
 ---
 

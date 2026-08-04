@@ -122,11 +122,21 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
   `argv_capable` is a new fail-closed field on `NodeRegistration` (not
   `NodeCapabilities` — it is a runner posture, not a hardware fact);
   `IsolationAwarePlacement` requires **both** `sandbox_capable` and
-  `argv_capable` before leasing a command task to a node, and the
-  `allowFallback` waiver cannot bypass that gate. `CommandRecipe` rejects
-  `isolation.tier != "sandboxed"` for command jobs (coordinator-side escape
-  hatch only: `FLASHML_ALLOW_UNSANDBOXED_ARGV=1`) — a submitter can never
-  downgrade their own isolation. The composite `(job_id, task_id)` lease key
+  `argv_capable` before leasing a command task to a node. The `allowFallback`
+  waiver does bypass that gate, but only for a pool-scoped job landing on a
+  node that opted in: `payload["pool"]` set, `allowFallback is True`, and
+  the node's own `unsandboxed_argv_capable is True` (the operator ran
+  `flashnode work --runner trusted`) — three legs, each fail-closed, and a
+  separate pool-membership gate confines the job to that pool's own
+  machines regardless, so the waiver's blast radius never reaches past the
+  team that granted it. `CommandRecipe` couples the two at submission time:
+  `allowFallback` is rejected outright unless `placement.pool` is set, so
+  nothing upstream can produce a waiver with no pool to confine it. Outside
+  a pool, `CommandRecipe` still rejects `isolation.tier != "sandboxed"` for
+  command jobs (coordinator-side escape hatch only:
+  `FLASHML_ALLOW_UNSANDBOXED_ARGV=1`) — a submitter can downgrade their own
+  isolation only inside a pool whose operator explicitly opted a machine
+  in. The composite `(job_id, task_id)` lease key
   (both `InMemoryLeaseStore` and `SqliteLeaseStore`, with an in-place SQLite
   migration from the old single-column primary key) landed alongside this so
   a multi-job volunteer pool doesn't collide two jobs' `task-000`. **Known
