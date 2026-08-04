@@ -232,8 +232,13 @@ non-pool task to a trusted-tier worker outright (fail closed, the same
 placement gate as everything else in this doc), so a machine running
 `--runner trusted` never receives a stranger's job, only its own pool's. Run
 `flashnode work --runner trusted --coordinator https://<coordinator>` to opt
-in; there is no environment variable equivalent, and the command prints its
-own unsandboxed warning every time it starts.
+in — or set `FLASHNODE_RUNNER=trusted` in the environment, which `--runner`
+itself defaults from, so the flag on the command line is not the only place
+this opt-in can live. Either way it is explicit and typed by a human, never
+inferred; a host operator auditing a machine should check both the
+invoking command line and its environment before assuming a worker is
+sandboxed. The command prints its own unsandboxed warning every time it
+starts, regardless of which one triggered it.
 
 This tier is a reasonable default for hosts that structurally cannot run
 `--runner argv` at all — a Colab notebook or a rented pod, neither of which
